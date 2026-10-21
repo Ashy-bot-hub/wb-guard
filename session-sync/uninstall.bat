@@ -1,0 +1,6 @@
+@echo off
+rem WorkDaddy Guard - uninstall
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
+echo.
+pause

@@ -1,0 +1,10 @@
+# 运行时产物，不入库
+backups/
+logs/
+digest/
+__pycache__/
+_*/
+*.pid
+*.db
+lineage-registry.json
+mirror-registry.json
