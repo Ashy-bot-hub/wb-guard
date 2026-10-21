@@ -1,0 +1,48 @@
+--- a/scripts/daemon.js
++++ b/scripts/daemon.js
+@@ -12091,9 +12091,43 @@
+         const memberIds = Array.from(new Set(members.map((m) => m.id).filter((id) => isValidSessionId(id))));
+         if (!memberIds.length) return json(res, 404, { ok: false, error: '会话不存在或已删除' });
+         const placeholders = sqlPlaceholders(memberIds);
+-        const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND COALESCE(is_background_automation, 0) = 0;', memberIds);
++        const before = await sqliteQuery('SELECT id, user_id, cwd, title, created_at FROM sessions WHERE id IN (' + placeholders + ') AND COALESCE(is_background_automation, 0) = 0;', memberIds);
+         const matchedSet = new Set(before.map((row) => String(row.id || '')));
+-        const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
++        let matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
++        // [同源副本级联] 自动同步会在同账号/其他账号留下 cwd + title + created_at 完全一致的
++        // 副本行；官方删除只标记它当时指向的那一行，兄弟行仍 deleted_at IS NULL，于是会话页
++        // 一直列出它，表现为「任务删掉了但列表里还在」。这里按指纹把兄弟行纳入同一删除集。
++        const siblingIds = new Set();
++        for (const row of before) {
++          const cwd = String(row.cwd || '').trim();
++          const title = String(row.title || '');
++          const createdAt = Number(String(row.created_at || '').trim());
++          if (!cwd || !title.trim() || !Number.isFinite(createdAt) || createdAt <= 0) continue;
++          try {
++            const sibs = await sqliteQuery(
++              "SELECT id FROM sessions WHERE LOWER(RTRIM(REPLACE(cwd, '\\', '/'), '/')) = LOWER(RTRIM(REPLACE(?, '\\', '/'), '/')) AND COALESCE(title, '') = ? AND CAST(created_at AS INTEGER) = ? AND COALESCE(is_background_automation, 0) = 0;",
++              [cwd, title, createdAt]
++            );
++            for (const sib of sibs) {
++              const sid = String(sib.id || '');
++              if (isValidSessionId(sid) && !matchedSet.has(sid)) siblingIds.add(sid);
++            }
++          } catch (e) {
++            log(`[sessions-delete] 展开同源副本失败 ${row.id}: ${e.message}`);
++          }
++        }
++        if (siblingIds.size) {
++          const extraIds = Array.from(siblingIds);
++          const extraRows = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + sqlPlaceholders(extraIds) + ');', extraIds);
++          extraRows.forEach((row) => {
++            const rid = String(row.id || '');
++            if (isValidSessionId(rid) && !matchedSet.has(rid)) {
++              matchedSet.add(rid);
++              matchedIds.push(rid);
++            }
++            before.push(row);
++          });
++        }
+         const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
+         // 1) 先完成可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
+         const wbHome = PROFILE.dataRoot;

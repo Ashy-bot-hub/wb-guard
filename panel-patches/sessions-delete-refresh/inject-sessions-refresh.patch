@@ -1,0 +1,166 @@
+--- a/scripts/inject.js
++++ b/scripts/inject.js
+@@ -8639,6 +8639,9 @@
+         syncWallpaperCardVisibility(currentThemeId);
+       }
+       if (name === 'sessions' && sessionsPane && !sessionsPane.dataset.built) buildSessionsPane();
++      // [会话页刷新] 面板常驻 DOM，再次进入不再重建；必须补一次静默拉取，
++      // 否则在官方界面已删除的会话/任务会一直留在列表里（旧逻辑只在首次构建时拉取）。
++      else if (name === 'sessions' && sessionsPane && typeof sessionsPane.__wbsReload === 'function') sessionsPane.__wbsReload();
+       if (name === 'models' && modelsPane && !modelsPane.dataset.built) buildModelsPane();
+       if (name === 'enhance' && enhancePane && !enhancePane.dataset.built) buildEnhancePane();
+       if (name === 'automations' && automationPane && !automationPane.dataset.built) buildAutomationPane();
+@@ -9433,6 +9436,19 @@
+       loadAutomationSyncSetting();
+       pollActiveSessionCopyJob();
+       pollSessionExport();
++      // [会话页刷新] 对外暴露静默重载入口，供 switchTab 在再次进入本页时调用。
++      sessionsPane.__wbsReload = function () { loadSessions(true); };
++      // [会话页刷新] 官方侧删除/新建会话不会通知本面板，页面停留期间每 6s 静默对账一次：
++      // 仅在「会话」标签激活、页面可见、无弹窗、非批量勾选时执行，不闪「加载中」。
++      var sessSilentTimer = setInterval(function () {
++        if (document.visibilityState !== 'visible') return;
++        if (!sessionsPane || !sessionsPane.classList.contains('active')) return;
++        var modal = sessionsPane.querySelector('#wbs-sess-modal');
++        if (modal && modal.style.display !== 'none') return;
++        if (sessionsState.batchMode) return;
++        loadSessions(true);
++      }, 6000);
++      registerDisposer(function () { clearInterval(sessSilentTimer); sessionsPane.__wbsReload = null; });
+       registerDisposer(function () { if (sessionsState.autoCopyPollTimer) clearTimeout(sessionsState.autoCopyPollTimer); });
+       registerDisposer(function () { if (sessionsState.exportPollTimer) clearTimeout(sessionsState.exportPollTimer); });
+     }
+@@ -9539,30 +9555,54 @@
+       }).catch(function () {});
+     }
+ 
+-    function loadSessions() {
++    // 列表指纹：id + 大小 + 最近活动时间。静默刷新只在指纹变化时重绘，
++    // 避免定时轮询把「加载中…」和勾选状态打断。
++    function sessionsRenderSignature(list) {
++      return (list || []).map(function (s) {
++        return String(s.id) + ':' + String(s.totalBytes == null ? '' : s.totalBytes) + ':' +
++          String(s.last_activity_at || s.updated_at || s.created_at || '') + ':' + String(s.title || '');
++      }).join('|');
++    }
++
++    function loadSessions(silent) {
+       if (!sessionsPane) return;
+       var listEl = sessionsPane.querySelector('#wbs-sess-list');
+       if (!listEl) return;
+-      listEl.innerHTML = '<div class="wbs-empty">加载中…</div>';
++      if (!silent) listEl.innerHTML = '<div class="wbs-empty">加载中…</div>';
+       // uid: undefined=当前账号(不传)，''=全部账号，具体值=指定账号
+       var url = '/api/sessions?range=' + (sessionsState.range || '7d');
+       if (sessionsState.uid !== undefined) url += '&uid=' + encodeURIComponent(sessionsState.uid);
+       api(url).then(function (d) {
+         // 任务会话（is_playground=1）保留在列表中，由渲染层归入「任务」分组展示与操作。
+-        sessionsState.list = ((d && d.sessions) || []);
++        var incoming = ((d && d.sessions) || []);
++        var signature = sessionsRenderSignature(incoming);
++        // 静默刷新且数据没变（含批量勾选中）：直接返回，不重绘。
++        if (silent && (sessionsState.batchMode || signature === sessionsState.renderSignature)) return;
++        sessionsState.list = incoming;
++        sessionsState.renderSignature = signature;
+         sessionsState.totalBytes = d && d.totalBytes;
+         sessionsState.autoCopy = (d && d.autoCopy) || null;
+         sessionsState.autoCopyAll = !!(d && d.autoCopyAll);
+-        sessionsState.selected = {};
+-        sessionsState.wsExpanded = {};
++        if (silent) {
++          // 静默刷新保留勾选与展开状态，只剔除已不存在的会话 id。
++          var alive = Object.create(null);
++          incoming.forEach(function (s) { alive[String(s.id)] = true; });
++          Object.keys(sessionsState.selected).forEach(function (id) {
++            if (!alive[id]) delete sessionsState.selected[id];
++          });
++        } else {
++          sessionsState.selected = {};
++          sessionsState.wsExpanded = {};
++        }
+         renderSessions();
+         // 筛选变化后退出批量模式（勾选框隐藏 + 恢复工具栏右侧按钮）
+-        if (sessionsState.batchMode) {
++        if (!silent && sessionsState.batchMode) {
+           sessionsState.batchMode = false;
+           setSessBatchBar(false);
+         }
+         updateSessCount();
+       }).catch(function (e) {
++        if (silent) return;
+         listEl.innerHTML = '<div class="wbs-empty">会话加载失败: ' + esc(e.message || e) + '</div>';
+       });
+     }
+@@ -10257,6 +10297,38 @@
+         toast('加载账号失败: ' + (e.message || e), true, root);
+       });
+     }
++    // [同源副本] 自动同步会让同一条会话在多个账号、多次复制后留下 cwd + title + created_at
++    // 完全一致的副本行。只删当前列表里的那一行时，兄弟副本仍被会话页列出，看起来就是
++    // 「任务删不掉」。因此删除前用「全部账号」快照按指纹把兄弟行一并纳入删除集。
++    function sessionFingerprint(s) {
++      var cwd = String((s && s.cwd) || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
++      var title = String((s && s.title) || '');
++      var createdAt = Number((s && s.created_at) || 0);
++      if (!cwd || !title.trim() || !isFinite(createdAt) || createdAt <= 0) return '';
++      return cwd + '\u0001' + title + '\u0001' + createdAt;
++    }
++    function expandSessionCopies(ids) {
++      var wanted = Object.create(null);
++      var prints = Object.create(null);
++      (sessionsState.list || []).forEach(function (s) {
++        if (ids.indexOf(s.id) === -1) return;
++        wanted[s.id] = true;
++        var fp = sessionFingerprint(s);
++        if (fp) prints[fp] = true;
++      });
++      if (!Object.keys(prints).length) return Promise.resolve(ids);
++      return api('/api/sessions?range=all&uid=').then(function (d) {
++        var extra = [];
++        ((d && d.sessions) || []).forEach(function (s) {
++          if (wanted[s.id]) return;
++          var fp = sessionFingerprint(s);
++          if (!fp || !prints[fp]) return;
++          wanted[s.id] = true;
++          extra.push(s.id);
++        });
++        return ids.concat(extra);
++      }).catch(function () { return ids; });
++    }
+     // 删除弹窗：确认框（真实删除，弹窗内警示不可恢复）
+     function openDeleteModal(ids, allAccounts) {
+       ids = ids.slice();
+@@ -10280,6 +10352,8 @@
+           titleEl.textContent = '再次确认永久删除';
+           okBtn.textContent = '永久删除';
+           cancelBtn.focus();
++          // 两步确认容易被当成「已执行」：明确提示还要再点一次。
++          toast('还需再点一次「永久删除」才会执行', false, root);
+           return;
+         }
+         pending = true;
+@@ -10288,12 +10362,19 @@
+         okBtn.textContent = '删除中…';
+         okBtn.classList.add('is-loading');
+         okBtn.setAttribute('aria-busy', 'true');
+-        api('/api/sessions/delete', {
+-          method: 'POST',
+-          headers: { 'content-type': 'application/json' },
+-          body: JSON.stringify({ ids: ids }),
++        if (typeof console !== 'undefined' && console.log) console.log('[WBS][sessions-delete] submit ids=' + ids.length);
++        expandSessionCopies(ids).then(function (targetIds) {
++          if (typeof console !== 'undefined' && console.log) console.log('[WBS][sessions-delete] expanded ids=' + targetIds.length);
++          return api('/api/sessions/delete', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ids: targetIds }),
++          });
+         }).then(function (d) {
+-          var extra = (d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '';
++          // 删除总数减去勾选数即为「顺带清掉的同源副本」，比 daemon 单独回报的 cascaded 更直观。
++          var swept = (d && typeof d.deleted === 'number' && d.deleted > ids.length) ? d.deleted - ids.length : 0;
++          var extra = swept ? '，含同源副本 ' + swept + ' 个'
++            : ((d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '');
+           toast('已删除 ' + ((d && typeof d.deleted === 'number') ? d.deleted : ids.length) + ' 个会话' + extra, false, root);
+           if (okBtn.onclick === submit) showSessModal(false);
+           loadSessions();
