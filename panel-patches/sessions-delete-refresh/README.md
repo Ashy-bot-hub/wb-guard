@@ -41,9 +41,21 @@
 | `WBS_I18N_EN` 字典 | 新增 `还需再点一次「永久删除」才会执行` 的英文映射 |
 | `openDeleteModal` 第二步确认 | 给出 toast 提示，避免把「再次确认」当成已执行 |
 | `openDeleteModal` 结果提示 | 用 `deleted - 勾选数` 显示「含同源副本 N 个」 |
+| `wbsReportErr` 错误钩子 | 取不到 `ev.error` / `ev.reason` 时退回 `ev.message`，并过滤 `ResizeObserver loop` 噪声；监听器改为具名并登记到 `window.__wbsErrListener`，重注入时先解绑再注册 |
 
 面板侧刻意**不**再发 `/api/sessions?range=all` 快照：上游 `session-delete-ui.test.js` 锁定
 「删除只发一次 `/api/sessions/delete`」，且 daemon 侧已能一次删净。
+
+### 为什么顺手改了错误钩子
+
+`daemon.log` 里 99% 的 `[wbscrash] error: null` 不是崩溃。上游钩子只读 `ev.error` / `ev.reason`，
+而浏览器在 `ResizeObserver` 循环、资源加载失败等场景下 `ev.error` 恒为 `null`，真实原因只写在
+`ev.message` 里。于是在页面里加临时探针（未改文件）抓到的实际内容是
+`ResizeObserver loop completed with undelivered notifications.`，属浏览器良性告警。
+
+原钩子还有一处隐患：监听器是匿名函数且用 `window.__wbsErrHook` 做守卫，重注入时既不会解绑旧的、
+也不会注册新的，改完代码必须重启客户端才生效。本补丁把监听器存进 `window.__wbsErrListener`，
+并在注入前的清理段按引用解绑，重注入即可换新。
 
 ## 三、验证结果（本次实测）
 
@@ -55,6 +67,8 @@
 | 语法 | `node --check` 对 `inject.js`、`daemon.js` 均通过（源码树与实机产物各一次） |
 | 删除/会话/国际化相关测试 | 7 个相关测试文件共 112 项：112 项中 111 过、1 失败；未打补丁的干净基线同样 111 过 1 失败（同一项 `native automatic first copy registers destination ownership`），差集为空 |
 | 上游全量测试 | 1393 项：未打补丁 29 项失败，打补丁同样 29 项失败，差集为空（失败项与补丁无关，多为平台/环境类断言） |
+| 降噪实测（实机） | 重注入后连续 90 秒新增 `[wbscrash]` 0 条（改前该时段为每分钟 3~37 条），同期日志仍在正常写入；主动抛 `Error('wbg-filter-probe-real')` 被正常记录，手工派发 `ResizeObserver loop` 事件被过滤 |
+
 | `apply.py` 往返 | 应用后回滚，两文件 sha256 与原始完全一致 |
 | 实机产物与验证产物一致性 | 实机 `inject.js` 与源码树补丁产物逐行相同；`daemon.js` 仅差 `DAEMON_VERSION` / `DAEMON_BUILD_ID` 两行 |
 | 实机守护重启 | 终止旧进程后 watchdog 3s 内拉起新进程，`/api/status` 返回 `version 1.2.18`，注入接口返回 `mounted: true`，页面悬浮按钮存在 |
@@ -101,15 +115,30 @@ python verify_cascade.py --yes    # 插 3 行测试会话 → 调真删除接口
 python apply.py --revert
 ```
 
+补丁内容更新过之后，旧版本补丁无法反向应用（hunk 上下文已变），`apply.py` 会识别并给出提示，
+此时用补丁前的备份把原版恢复回去再重打：
+
+```powershell
+python apply.py --restore-backup   # 从最新一份 patches-backup-* 恢复原版，当前文件另存备查
+python apply.py --dry-run && python apply.py
+```
+
 `apply.py` 的行为说明：
 
 - 两类通道：优先 `git apply` 做交叉校验；机器上没有 git、或目标文件是 CRLF 行尾时用内置应用器，
   两条通道产物逐字节一致（CRLF 文件保留原行尾）。
 - 实机行尾不统一：本机 1.2.17 安装包中 `inject.js` 是 CRLF、`daemon.js` 是 LF，脚本按文件自动判断。
-- 幂等：检测到补丁标记时直接提示「无需重复应用」，不会重复插入。
+- 幂等：检测到补丁标记时直接提示「无需重复应用」，不会重复插入；如果本机打的是更早版本的补丁，
+  脚本会列出缺失的标记并以退出码 2 停止，避免把新 hunk 叠到旧补丁上。
 - python 不在 PATH 时，用本机 Python 绝对路径调用同一脚本即可。
 
 ## 六、已知局限
+
+- 降噪只针对 `ResizeObserver loop` 这一类。其它 `ev.error` 为 `null` 的 `error` 事件现在会带上
+  `ev.message` 与 `文件名:行:列`，不再是一条无信息的 `null`；若上游以后改用别的无害告警文案，
+  需要按实测新增过滤规则。
+- 已经打开的页面里，旧版匿名监听器无法从代码侧解绑。补丁生效前若页面已注入过旧钩子，
+  第一次需要重启客户端（或重载页面）让 `window` 重建；此后每次重注入都能正常换新。
 
 - 作用域只在面板「删除」（硬删路径）。本补丁改的是 `POST /api/sessions/delete`，该接口执行
   `DELETE FROM sessions` 并清理文件；WorkBuddy 官方界面里的删除走的是软删（只写 `deleted_at`），

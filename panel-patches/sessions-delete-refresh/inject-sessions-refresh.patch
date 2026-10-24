@@ -1,8 +1,25 @@
 diff --git a/scripts/inject.js b/scripts/inject.js
-index 7387910..d1c2459 100644
+index 7387910..6d26ccf 100644
 --- a/scripts/inject.js
 +++ b/scripts/inject.js
-@@ -1856,6 +1856,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -1188,6 +1188,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+     // findWbsAdapter 的缓存校验会直接复用旧 shim，导致「修好代码重注入后仍跑旧逻辑」。
+     try { delete window.__wbsAnySessionBusy; } catch (_) { window.__wbsAnySessionBusy = null; }
+     try { delete window.__wbsAdapter; } catch (e) { window.__wbsAdapter = null; }
++    // [wbscrash 降噪] 错误钩子必须能随重注入一起换掉：只删标记会留下旧的匿名监听器，
++    // 结果是新旧两套钩子同时上报。这里先按登记的函数引用解绑，再清标记。
++    try {
++      if (window.__wbsErrListener) {
++        if (window.__wbsErrListener.error) window.removeEventListener('error', window.__wbsErrListener.error);
++        if (window.__wbsErrListener.rejection) window.removeEventListener('unhandledrejection', window.__wbsErrListener.rejection);
++      }
++      delete window.__wbsErrListener;
++      delete window.__wbsErrHook;
++    } catch (e) {}
+   })();
+   // ===== 顶部红色角标已移除（用户要求）；仅保留 console 标记 =====
+   try { console.log('[WBS] inject.js 已执行于', location.href, 'body=', !!document.body); } catch (_) {}
+@@ -1856,6 +1866,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
      '清空': 'Clear', '继续': 'Continue', '更换': 'Change',
      '删除所有账号同步副本': 'Delete synced copies across accounts', '删除选中会话及所有账号的同步副本': 'Delete selected sessions and their synced copies across accounts',
      '删除所有账号的同源会话？': 'Delete linked sessions across all accounts?', '再次确认永久删除': 'Confirm permanent deletion again',
@@ -10,7 +27,43 @@ index 7387910..d1c2459 100644
      '继续确认': 'Continue to confirmation', '永久删除': 'Delete permanently',
      '将永久删除所选会话，以及已关联到其他账号的所有同步副本、消息文件和本地缓存。此操作不可恢复。': 'Permanently deletes the selected sessions and all synced copies, message files and local cache across accounts. This cannot be undone.',
      '消息文字阴影': 'Message text shadow', '增强壁纸上的消息文字辨识度': 'Improve message readability over wallpaper',
-@@ -10286,6 +10287,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -2257,7 +2268,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+         if (e instanceof Error) { msg = e && e.message; stack = e && e.stack; }
+         else if (e && e.message) { msg = e.message; stack = e.stack; }
+         else { msg = String(e); }
++        // window 的 error 事件在「资源加载失败」「ResizeObserver 循环」等场景下 error 恒为
++        // null，真正的原因只写在 ev.message 里；不补这一步，日志只剩一条没有信息的 null。
++        if (!msg || msg === 'null' || msg === 'undefined') {
++          if (ev && ev.message) {
++            msg = String(ev.message);
++            if (ev.filename) msg += ' @ ' + ev.filename + ':' + (ev.lineno || 0) + ':' + (ev.colno || 0);
++          }
++        }
+       } catch (_) {}
++      // [wbscrash 降噪] 取不到任何信息就不写；ResizeObserver 循环是浏览器的良性告警
++      // （布局回调里再次改尺寸），既不影响功能也没法从业务代码消除，逐条留痕只会把
++      // 真正的错误挤出日志——本机实测它占了日志的 9.5%~29.3%。
++      if (!msg || msg === 'null' || msg === 'undefined') return;
++      if (/^ResizeObserver loop/i.test(msg)) return;
+       var line = '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
+       try { console.error(line); } catch (_) {}
+       if (WBS_DIAGNOSTICS_ENABLED) {
+@@ -2266,8 +2290,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+         } catch (_) {}
+       }
+     }
+-    window.addEventListener('error', function (ev) { wbsReportErr('error', ev); });
+-    window.addEventListener('unhandledrejection', function (ev) { wbsReportErr('unhandledrejection', ev); });
++    // 监听器要留引用，重注入时才能解绑；匿名函数会让旧钩子一直活着。
++    var onWindowError = function (ev) { wbsReportErr('error', ev); };
++    var onWindowRejection = function (ev) { wbsReportErr('unhandledrejection', ev); };
++    window.addEventListener('error', onWindowError);
++    window.addEventListener('unhandledrejection', onWindowRejection);
++    window.__wbsErrListener = { error: onWindowError, rejection: onWindowRejection };
+   }
+ 
+   var accountMaskEnabled = false;
+@@ -10286,6 +10314,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
            titleEl.textContent = '再次确认永久删除';
            okBtn.textContent = '永久删除';
            cancelBtn.focus();
@@ -19,7 +72,7 @@ index 7387910..d1c2459 100644
            return;
          }
          pending = true;
-@@ -10299,7 +10302,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -10299,7 +10329,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
            headers: { 'content-type': 'application/json' },
            body: JSON.stringify({ ids: ids }),
          }).then(function (d) {
