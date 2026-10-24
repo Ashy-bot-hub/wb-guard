@@ -49,13 +49,36 @@
 
 | 位置 | 改动 |
 |---|---|
-| `WBS_I18N_EN` 字典 | 新增 `还需再点一次「永久删除」才会执行` 的英文映射；移除只服务于旧分支的 `含其他账号副本 {n} 个` |
+| `WBS_I18N_EN` 字典 | 新增 `还需再点一次「永久删除」才会执行` 的英文映射 |
 | `openDeleteModal` 第二步确认 | 给出 toast 提示，避免把「再次确认」当成已执行 |
-| `openDeleteModal` 结果提示 | 直接读 daemon 回报的 `cascaded`（与 `deleted - 勾选数` 恒等），不再两套算法并存 |
 | `wbsReportErr` 错误钩子 | 取不到 `ev.error` / `ev.reason` 时退回 `ev.message`，并过滤 `ResizeObserver loop` 噪声；监听器改为具名并登记到 `window.__wbsErrListener`，重注入时先解绑再注册 |
+
+删除结果提示**没有**改动：1.2.18 上游已经写成
+`var extra = (d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : ''`，
+与补丁早期版本想做的「显示顺带删掉的副本数」完全等价。早先那版改成 `deleted - 勾选数`
+只是把文案换成「含同源副本」，属重复实现，已回退成上游原样。
 
 面板侧刻意**不**再发 `/api/sessions?range=all` 快照：上游 `session-delete-ui.test.js` 锁定
 「删除只发一次 `/api/sessions/delete`」，且 daemon 侧已能一次删净。
+
+### 与上游已有功能的重叠度（逐项核过）
+
+| 补丁改动 | 上游 1.2.18 是否已有 | 判定 |
+|---|---|---|
+| 两步确认 toast | 没有（上游第一次点击只是把按钮文案换成「永久删除」并 `return`） | 纯增量 |
+| 删除结果提示 | 有，`d.cascaded` + 「含其他账号副本」 | **完全重复，已回退** |
+| `session_usage` 回收 | 没有（全文无 `DELETE`，只有 `INSERT OR REPLACE` 与单条 `SELECT`） | 纯增量 |
+| `workspaces` 回收 | 没有（daemon 完全不碰这张表） | 纯增量 |
+| `wbsReportErr` 降噪与解绑 | 没有（原钩子只读 `ev.error`，匿名监听器 + 标记守卫） | 纯增量 |
+| 同源副本指纹级联 | 有 lineage 级联 `collectLineageMembersForDelete` | **功能重复，属防御性保留**，见下 |
+
+指纹级联的重复度是实测的：把本机 26 组活跃重复指纹逐个拿去比对 `meta.json` 的三处映射
+（`sessions[].members`、`sessionIndex`、`copies[].targetId`），**26 组全部落在同一 lineage 内、
+0 组需要指纹补位**。也就是说在映射完整时上游的 lineage 展开已经能删净，指纹这一层当前零额外覆盖。
+
+保留它的理由只有一条：映射被外部写坏时（例如 `wd_unify --prune-empty` 软删空壳、或旧版复制记录
+没有迁进 lineage）指纹还能兜底。若要追求最小补丁，删掉 daemon.js 里那段指纹展开即可，
+其余改动不依赖它。
 
 ### 为什么顺手改了错误钩子
 
@@ -146,6 +169,9 @@ python apply.py --dry-run && python apply.py
 - 实机行尾不统一：本机 1.2.17 安装包中 `inject.js` 是 CRLF、`daemon.js` 是 LF，脚本按文件自动判断。
 - 幂等：检测到补丁标记时直接提示「无需重复应用」，不会重复插入；如果本机打的是更早版本的补丁，
   脚本会列出缺失的标记并以退出码 2 停止，避免把新 hunk 叠到旧补丁上。
+- 版本标记：补丁会在 `inject.js`、`daemon.js` 各写一行 `[wbg-patch rN]`。**每次改动补丁内容
+  都要把 `apply.py` 里的 `PATCH_VERSION` 同步 +1**，否则已经打过旧版的机器会被误判成「已是最新」
+  而跳过，新改动永远落不了地。
 - python 不在 PATH 时，用本机 Python 绝对路径调用同一脚本即可。
 
 ## 六、已知局限

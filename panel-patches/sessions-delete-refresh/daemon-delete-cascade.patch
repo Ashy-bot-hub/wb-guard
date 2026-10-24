@@ -1,8 +1,8 @@
 diff --git a/scripts/daemon.js b/scripts/daemon.js
-index 8b64bcd..b61951f 100644
+index 8b64bcd..3914479 100644
 --- a/scripts/daemon.js
 +++ b/scripts/daemon.js
-@@ -12163,7 +12163,57 @@ function handleApi(req, res) {
+@@ -12163,7 +12163,58 @@ function handleApi(req, res) {
          const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND COALESCE(is_background_automation, 0) = 0;', memberIds);
          const matchedSet = new Set(before.map((row) => String(row.id || '')));
          const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
@@ -43,6 +43,7 @@ index 8b64bcd..b61951f 100644
 +          log(`[sessions-delete] 展开同源副本失败，仅删除原定集合: ${e.message}`);
 +        }
          const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
++        // [wbg-patch r5] 本文件被 wb-guard 的 sessions-delete-refresh 补丁修改过。
 +        // [附属登记回收] 先把待删会话的 cwd 取出来：sessions 行删掉之后就查不到了。
 +        // 只用于判断这些一次性时间戳目录还有没有别的活跃会话在用。
 +        let removedCwds = [];
@@ -60,7 +61,7 @@ index 8b64bcd..b61951f 100644
          // 1) 先完成可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
          const wbHome = PROFILE.dataRoot;
          let filesRemoved = 0;
-@@ -12187,6 +12237,53 @@ function handleApi(req, res) {
+@@ -12187,6 +12238,53 @@ function handleApi(req, res) {
            if (codeBuddyFiles) filesRemoved = await codeBuddyFiles.deleteSessions(matchedIds, removeRecords);
            else await removeRecords();
          }

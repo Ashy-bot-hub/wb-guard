@@ -34,11 +34,13 @@ MARKERS = {
 }
 # 最新版补丁必须具备的标记。缺任一说明本机打的是更早的版本，须先 --revert 再应用，
 # 因为新版 hunk 的行号与上下文件已经变了，无法叠在旧补丁之上。
+# 最新版补丁必须具备的标记。缺任一说明本机打的是更早的版本，须先用补丁前备份恢复原版
+# 再重打——新版 hunk 的行号与上下文都变了，无法叠在旧补丁之上。
+# 版本号 `wbg-patch rN`：每次改动补丁内容都要同步 +1，否则老机器会被误判成「已是最新」。
+PATCH_VERSION = "r5"
 REQUIRED_MARKERS = {
-    # 两处都要有：只有 [wbscrash 降噪] 说明是「只过滤、没解绑监听器」的中间版本。
-    "inject.js": ("[wbscrash 降噪]", "window.__wbsErrListener"),
-    # 只有 [同源副本级联] 说明是「级联但没回收附属登记」的中间版本。
-    "daemon.js": ("[同源副本级联]", "[附属登记回收]"),
+    "inject.js": ("[wbg-patch %s]" % PATCH_VERSION,),
+    "daemon.js": ("[wbg-patch %s]" % PATCH_VERSION,),
 }
 
 

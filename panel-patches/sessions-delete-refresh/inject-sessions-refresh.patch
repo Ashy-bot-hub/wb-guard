@@ -1,11 +1,12 @@
 diff --git a/scripts/inject.js b/scripts/inject.js
-index 7387910..b567bfc 100644
+index 7387910..56a307c 100644
 --- a/scripts/inject.js
 +++ b/scripts/inject.js
-@@ -1188,6 +1188,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -1188,6 +1188,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
      // findWbsAdapter 的缓存校验会直接复用旧 shim，导致「修好代码重注入后仍跑旧逻辑」。
      try { delete window.__wbsAnySessionBusy; } catch (_) { window.__wbsAnySessionBusy = null; }
      try { delete window.__wbsAdapter; } catch (e) { window.__wbsAdapter = null; }
++    // [wbg-patch r5] 本文件被 wb-guard 的 sessions-delete-refresh 补丁修改过。
 +    // [wbscrash 降噪] 错误钩子必须能随重注入一起换掉：只删标记会留下旧的匿名监听器，
 +    // 结果是新旧两套钩子同时上报。这里先按登记的函数引用解绑，再清标记。
 +    try {
@@ -19,7 +20,7 @@ index 7387910..b567bfc 100644
    })();
    // ===== 顶部红色角标已移除（用户要求）；仅保留 console 标记 =====
    try { console.log('[WBS] inject.js 已执行于', location.href, 'body=', !!document.body); } catch (_) {}
-@@ -1856,6 +1866,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -1856,6 +1867,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
      '清空': 'Clear', '继续': 'Continue', '更换': 'Change',
      '删除所有账号同步副本': 'Delete synced copies across accounts', '删除选中会话及所有账号的同步副本': 'Delete selected sessions and their synced copies across accounts',
      '删除所有账号的同源会话？': 'Delete linked sessions across all accounts?', '再次确认永久删除': 'Confirm permanent deletion again',
@@ -27,15 +28,7 @@ index 7387910..b567bfc 100644
      '继续确认': 'Continue to confirmation', '永久删除': 'Delete permanently',
      '将永久删除所选会话，以及已关联到其他账号的所有同步副本、消息文件和本地缓存。此操作不可恢复。': 'Permanently deletes the selected sessions and all synced copies, message files and local cache across accounts. This cannot be undone.',
      '消息文字阴影': 'Message text shadow', '增强壁纸上的消息文字辨识度': 'Improve message readability over wallpaper',
-@@ -2002,7 +2013,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-     '无可同步的目标账号（已排除会话所属账号）': 'No target accounts to sync to (the session owner account is excluded)',
-     '删除后会话将从列表中移除，该账号下的本地消息文件将被永久删除，此操作不可恢复。': 'The sessions are removed from the list and their local message files are permanently deleted; this cannot be undone.',
-     '删除后会话将从列表中移除，本账号的会话及同步到其他账号的同源会话（本地消息文件）都将被永久删除，此操作不可恢复。': 'The sessions are removed from the list. These sessions and their synced counterparts in other accounts (local message files) are permanently deleted; this cannot be undone.',
--    '含其他账号副本 {n} 个': ' including {n} other-account copies',
-     '以「不让当前账号登录身份过期」的方式切到登录页，可以登录新账号，也可以切回已登录账号': 'Goes to the login page without letting the current account expire; log in a new account or switch back to an existing one.',
-     '不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表': 'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.',
-     '正在发起授权…': 'Starting authorization…', '再想想': 'Not now',
-@@ -2257,7 +2267,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -2257,7 +2269,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
          if (e instanceof Error) { msg = e && e.message; stack = e && e.stack; }
          else if (e && e.message) { msg = e.message; stack = e.stack; }
          else { msg = String(e); }
@@ -56,7 +49,7 @@ index 7387910..b567bfc 100644
        var line = '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
        try { console.error(line); } catch (_) {}
        if (WBS_DIAGNOSTICS_ENABLED) {
-@@ -2266,8 +2289,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -2266,8 +2291,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
          } catch (_) {}
        }
      }
@@ -71,7 +64,7 @@ index 7387910..b567bfc 100644
    }
  
    var accountMaskEnabled = false;
-@@ -10286,6 +10313,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -10286,6 +10315,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
            titleEl.textContent = '再次确认永久删除';
            okBtn.textContent = '永久删除';
            cancelBtn.focus();
@@ -80,14 +73,3 @@ index 7387910..b567bfc 100644
            return;
          }
          pending = true;
-@@ -10299,7 +10328,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-           headers: { 'content-type': 'application/json' },
-           body: JSON.stringify({ ids: ids }),
-         }).then(function (d) {
--          var extra = (d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '';
-+          // daemon 回报的 cascaded 就是「请求之外顺带清掉的同源副本数」，与
-+          // deleted - 勾选数 数学恒等。原先两套算法并存，这里统一用 daemon 的。
-+          var extra = (d && d.cascaded) ? '，含同源副本 ' + d.cascaded + ' 个' : '';
-           toast('已删除 ' + ((d && typeof d.deleted === 'number') ? d.deleted : ids.length) + ' 个会话' + extra, false, root);
-           if (okBtn.onclick === submit) showSessModal(false);
-           loadSessions();
