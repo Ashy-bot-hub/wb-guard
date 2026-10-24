@@ -24,7 +24,9 @@ PATCHES = [
     ("daemon-delete-cascade.patch", "daemon.js"),
 ]
 TARGET_RELEASE = "1.2.18"
-TARGET_DAEMON_VERSION = "1.2.68"  # 1.2.18 安装包里 daemon.js 的 DAEMON_VERSION
+# 官方 tag 的 DAEMON_VERSION 是 1.2.68，但 release 打包时会把它改写成 tag 号，
+# 因此安装到本机的实际值是 1.2.18。两个都接受，其余值只警告不阻断。
+ACCEPTED_DAEMON_VERSIONS = ("1.2.18", "1.2.68")
 # 补丁写入的标记，用于幂等判断。1.2.17 版的旧标记一并识别。
 MARKERS = {
     "inject.js": ("还需再点一次「永久删除」才会执行", "[同源副本]"),
@@ -226,9 +228,9 @@ def main():
         sys.exit("找不到 WorkDaddy scripts 目录：%s" % scripts)
 
     version = read_daemon_version(scripts)
-    print("检测到 daemon 版本：%s（补丁目标：WorkDaddy %s / daemon %s）"
-          % (version, TARGET_RELEASE, TARGET_DAEMON_VERSION))
-    if version not in ("unknown", TARGET_DAEMON_VERSION):
+    print("检测到 daemon 版本：%s（补丁目标：WorkDaddy %s，可接受 daemon %s）"
+          % (version, TARGET_RELEASE, " / ".join(ACCEPTED_DAEMON_VERSIONS)))
+    if version not in ("unknown",) + ACCEPTED_DAEMON_VERSIONS:
         print("警告：版本不在已适配清单内，先跑 --dry-run 确认上下文仍然匹配。")
 
     patched = is_patched(scripts)

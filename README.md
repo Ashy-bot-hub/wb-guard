@@ -26,7 +26,7 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 
 > 该表以 2026-10-21 本机安装的 WorkDaddy `1.2.17` 客户端 `scripts/` 目录（68 个 js）全量检索为准，并用上游仓库 README 与 `daemon.js` 版本注记（记到 `1.2.141`）交叉核对。上游改版后需重核。
 >
-> 2026-10-24 复核 `1.2.18`（`DAEMON_VERSION` = `1.2.68`）：`scripts/` 下仅 `automation-model.js`、`daemon.js`、`inject.js`、`lib.js`、`persona.js` 五个文件有改动，主题为凭据刷新加密落盘、登录页账号切换、空会话同步、persona 备份根规范化、Windows 重启窗口可见性；上表涉及的能力边界未发生变化，`1.2.18` 另新增了面板会话页静默刷新（原先由本仓库补丁提供）。
+> 2026-10-24 复核 `1.2.18`（tag 内 `DAEMON_VERSION` = `1.2.68`，官方安装包打包后写作 `1.2.18`）：`scripts/` 下仅 `automation-model.js`、`daemon.js`、`inject.js`、`lib.js`、`persona.js` 五个文件有改动，主题为凭据刷新加密落盘、登录页账号切换、空会话同步、persona 备份根规范化、Windows 重启窗口可见性；上表涉及的能力边界未发生变化，`1.2.18` 另新增了面板会话页静默刷新（原先由本仓库补丁提供）。
 
 ## 上游没有的能力：留存依据
 
