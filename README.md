@@ -5,7 +5,7 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 | 目录 | 内容 |
 |---|---|
 | `session-sync/` | 一个 Windows 计划任务驱动的治理链：转录血缘统一、日志与影子副本回收、体检、库维护、备份保留策略。说明见 `session-sync/README.md` |
-| `panel-patches/` | 针对上游安装文件的一次性补丁（目前 1 项：会话页刷新 + 同源副本级联删除），带备份与回滚脚本。说明见各子目录 README |
+| `panel-patches/` | 针对上游安装文件的一次性补丁（目前 1 项：同源副本级联删除 + 两步确认提示，已适配 `1.2.18`），带校验、备份与回滚脚本。说明见各子目录 README |
 
 ## 与上游 WorkDaddy 的职责边界
 
@@ -25,6 +25,8 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 | 侧边栏登记与摘要导出 | `workspaces` 表在客户端代码中无任何写操作 | `wd_workspaces.py`、`build_digest.py` |
 
 > 该表以 2026-10-21 本机安装的 WorkDaddy `1.2.17` 客户端 `scripts/` 目录（68 个 js）全量检索为准，并用上游仓库 README 与 `daemon.js` 版本注记（记到 `1.2.141`）交叉核对。上游改版后需重核。
+>
+> 2026-10-24 复核 `1.2.18`（`DAEMON_VERSION` = `1.2.68`）：`scripts/` 下仅 `automation-model.js`、`daemon.js`、`inject.js`、`lib.js`、`persona.js` 五个文件有改动，主题为凭据刷新加密落盘、登录页账号切换、空会话同步、persona 备份根规范化、Windows 重启窗口可见性；上表涉及的能力边界未发生变化，`1.2.18` 另新增了面板会话页静默刷新（原先由本仓库补丁提供）。
 
 ## 上游没有的能力：留存依据
 
@@ -47,6 +49,7 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 ```
 .
 ├── README.md
+├── panel-patches/            # 安装包补丁（sessions-delete-refresh：同源副本级联删除）
 └── session-sync/             # 治理脚本与守护，说明见 session-sync/README.md
 ```
 
@@ -76,6 +79,7 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 - `session-sync` 用 `install.ps1` 注册计划任务、`uninstall.ps1` 停用（不动数据）、`uninstall-full.ps1` 连目录一起清。
 - 守护是否正常，用 `wd_doctor.py` 判定，不依赖人工记忆。
 - 客户端升级后若上游动了会话复制或自动化同步的实现，先重核上表再决定是否新增脚本。
+- 客户端升级会覆盖 `scripts/` 下的文件，`panel-patches/` 的补丁随之失效：升级后先跑 `python apply.py --dry-run`，上下文不匹配就说明需要重新适配补丁，不要直接 `apply`。
 
 ## 文档索引
 

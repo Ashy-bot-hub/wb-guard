@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = "1.2.17",
+    [string]$Version = "1.2.18",
     [switch]$Run,
     [string]$DownloadDir = (Join-Path $env:USERPROFILE "WorkBuddy\_wd_reinstall")
 )
