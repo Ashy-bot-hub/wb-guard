@@ -145,6 +145,10 @@ WorkBuddy 的日志没有任何轮转机制，`logs/sandbox` 一天能写 300 MB
 
 **不碰**：`Cookies`、`Login Data`、`Web Data`、`Preferences`、`Extensions`、`IndexedDB`、`projects/`（会话转录）。被进程占用的文件删不掉就跳过，不重试、不提权。
 
+**只看日志与浏览器缓存，不读也不写数据库。** 「保留 2 天」说的是 `logs/<日期>/` 这类目录，与会话无关 —— 会话的处置在 `wd_softdel.py`（且只碰 `deleted_at IS NOT NULL` 的行）。
+
+**每个对象在独立子进程里删。** 本机的删除通道是 fail-closed 且失败状态为进程级：一个对象删失败后，同进程里后续所有删除都会被直接拒绝。放在主循环里做，一个删不掉的文件就会让整轮清理停摆（2026-10-24 实测：21 项全跳过、回收 0 字节，其中 188 MB 本来能删）。整目录删不掉时还会退回逐子项，把能删的先删掉，最后再试一次 `rmdir`。
+
 ```bash
 python wd_janitor.py            # 只报告可回收多少
 python wd_janitor.py --apply    # 立即清一次
