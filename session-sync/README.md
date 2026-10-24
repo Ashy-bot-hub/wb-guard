@@ -251,7 +251,7 @@ Get-ChildItem .\backups | Sort-Object Name
 - 任务级唯一键 = 规范化目录 + 标题。改过标题的同一任务会被视为新任务。
 - 界面刷新交给 WorkDaddy：客户端 daemon 在账号切换时自行经 CDP 重载窗口（切号后约 0.5 秒），并在同步类操作后调用官方 `conversations.ensureList()` 刷列表。本包不做整页 reload，避免切号后连续白屏两次。需要手动刷新时执行 `node cdp.mjs eval "location.reload()"`。
 - 由此带来的一点取舍：本包在切号后写入的去重结果（SQLite）不会被客户端即时看见，需等下一次客户端刷新或手动刷新才显示。
-- `wd_audit.py --fix` 会剔除 `meta.json` 里指向已软删会话的「已标记」索引。该操作建议在 WorkBuddy 完全退出时执行，本包不自动调用。
+- `wd_audit.py --fix` 会剔除 `meta.json` 里指向已软删会话的「已标记」索引。该操作建议在 WorkBuddy 完全退出时执行，本包不自动调用。脚本内的进程检查会直接拒绝（退出码 3），不会写出半截 `meta.json`。为省掉手敲路径，同目录提供 `fix_audit.cmd`：先打印只读报告，再执行 `--fix`，最后停住显示退出码；运行前须完全退出 WorkBuddy（含托盘图标）。
 - 体检的 12 项覆盖「计划任务 / 进程 / 库完整性 / 库结构 / 复制索引残留 / 活跃会话 / 定时任务 / 日志 / 备份 / 会话附属数据 / 封口日志 / 数据增量」，加上五个按会话只增不减的目录（`changes-detail`、`blobs`、`cache`、`file-tree-manifests`、`traces`）。这五项合计超 2 GB 或任一单项超 1 GB 才告警 —— 阈值刻意放宽，只在明显失控时说话。不监控 `projects`（转录是核心资产，本就该大）与 `binaries`/`plugins`（程序本体按版本整体替换，不随使用累积）。
 - `wd_unify.py` 没有 argparse：不带参数直接执行，`--help` 会被当成普通参数忽略。其余脚本都支持 `-h`。
 - `wd_unify.py --apply` 带写库互斥：守护的定时任务正在写时，手动执行会打印「另一进程正在写库」并返回 3，等几十秒重试即可。
