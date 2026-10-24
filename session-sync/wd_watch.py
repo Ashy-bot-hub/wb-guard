@@ -44,6 +44,7 @@ HERE = C.HERE
 UNIFY = os.path.join(HERE, "wd_unify.py")
 JANITOR = os.path.join(HERE, "wd_janitor.py")
 DOCTOR = os.path.join(HERE, "wd_doctor.py")
+SOFTDEL = os.path.join(HERE, "wd_softdel.py")
 LOG = os.path.join(C.LOGS, C.LOG_GUARD)
 PID_FILE = os.path.join(HERE, C.PID_GUARD[0])
 
@@ -276,10 +277,14 @@ hourly_doctor.last = 0.0
 
 
 def daily_housekeeping():
-    """每天一次：清无引用的工作空间登记 + 清零内容空壳会话。
+    """每天一次：清无引用的工作空间登记 + 清零内容空壳会话 + 清孤儿用量行。
 
-    两者都只动数据库登记，不动磁盘文件，且都能用对应脚本的 --undo 还原。
+    前两者都只动数据库登记，不动磁盘文件，且都能用对应脚本的 --undo 还原。
     空壳阈值取 48 小时，避免把当天新建还没开始用的任务当成空壳。
+
+    注意：空壳清理用的是**软删**（只置 deleted_at），所以它自己就在制造软删积压。
+    软删行不会被任何界面再读到，但行、用量、11 处派生文件都会一直留着 ——
+    所以每天顺带做一次「孤儿用量行」回收；过期软删会话的硬删仍然要人确认。
     """
     now = time.time()
     if now - daily_housekeeping.last < 24 * 3600:
@@ -310,6 +315,22 @@ def daily_housekeeping():
         log("日常维护（空壳会话）→ %s" % (line or "无需处理"))
     except Exception as e:
         log("日常维护（空壳会话）异常：%r" % e)
+
+    # 软删积压的第一层收敛：孤儿 usage 行（指向已不存在会话的用量行）。
+    # 这类行没有任何读取路径能命中（各端都是 WHERE session_id = ?），删掉不影响
+    # 任何界面，所以可以无人值守做。第二层（硬删过期软删会话）不可逆，
+    # 只靠体检与日志提醒，等人显式跑 wd_softdel.py --prune。
+    if os.path.exists(SOFTDEL):
+        try:
+            p = _run([PY, SOFTDEL, "--purge-orphan-usage", "--yes"],
+                     capture_output=True, text=True, timeout=CMD_TIMEOUT, cwd=HERE)
+            line = ""
+            for l in (p.stdout or "").splitlines():
+                if l.startswith("已清理孤儿 usage"):
+                    line = l.strip()
+            log("日常维护（软删积压）→ %s" % (line or "无孤儿 usage"))
+        except Exception as e:
+            log("日常维护（软删积压）异常：%r" % e)
 
 
 daily_housekeeping.last = 0.0

@@ -49,6 +49,7 @@ import wd_audit as A
 import wd_db_maintain as D
 import wd_janitor as J
 import wd_shadow as S
+import wd_softdel as SD
 import wdrules as R
 
 # 任务名 → 当前包期望它跑的脚本。只校验「任务存在」是不够的：升级时漏改
@@ -422,6 +423,33 @@ def chk_index():
     return [{"name": "复制索引残留", "status": state, "detail": detail}]
 
 
+def chk_softdel():
+    """软删积压：官方界面「删除」只写 deleted_at，积压不会自愈。
+
+    这一项存在的理由与「客户端日志」不同：日志大只是占盘，软删积压会**影响
+    每一次判断**——体检说「活跃 151 条」是对的，但库里其实有 539 条，按表扫的
+    手工统计会得出双倍结论；`session_usage` 里指向已不存在会话的行更是纯垃圾。
+
+    只读统计（复用 wd_softdel.counts，两边不各写一份判据）；
+    真正的收敛要人跑 wd_softdel.py --prune，不可逆，不在体检里做。
+    """
+    if not os.path.exists(C.DB):
+        return [{"name": "软删积压", "status": WARN, "detail": "库文件不存在，无法统计"}]
+    try:
+        n = SD.counts()
+    except Exception as e:                          # noqa: BLE001
+        return [{"name": "软删积压", "status": WARN, "detail": "统计失败：%s" % e}]
+    state, why = SD.judge(n)
+    detail = ("软删 %d 条（%d 条仍占 %.0f MB 文件，其中 %d 条已过 %d 天宽限期）；"
+              "usage 孤儿 %d 行"
+              % (n["soft"], n["soft_with_files"], n["soft_bytes"] / 1048576,
+                 n["due"], n["grace_days"], n["orphan_usage"]))
+    if state != "ok":
+        detail += "；跑 wd_softdel.py 看清单，--purge-orphan-usage 可先清孤儿"
+    return [{"name": "软删积压",
+             "status": {"ok": OK, "warn": WARN, "fail": FAIL}[state], "detail": detail}]
+
+
 def chk_db(deep=False):
     r = D.check(deep=deep, full=False)
     rows = [{"name": "库完整性", "status": OK if r["ok"] else FAIL,
@@ -546,6 +574,7 @@ def run(deep=False):
     rows += chk_patch()
     rows += chk_schema()
     rows += chk_index()
+    rows += chk_softdel()
     db_rows, db = chk_db(deep=deep)
     rows += db_rows
     rows += chk_disk()

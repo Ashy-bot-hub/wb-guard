@@ -28,6 +28,7 @@ session-sync/
 ├── wd_shadow.py              会话附属数据回收（影子副本/诊断轨迹/编辑器历史）
 ├── wd_unify.py               转录存储层合并（内容可覆盖时共享 inode + 去重 + 状态纠正 + 清空壳）
 ├── wd_audit.py               体检「已标记」幽灵索引（counts() 供体检复用；--fix 需应用已退出）
+├── wd_softdel.py             软删积压核对与收敛（官方界面只软删：行/用量/派生文件全留）
 ├── wd_watch.py               守护主程序（切换检测 / 巡检 / 数据层维护）
 ├── wd_janitor.py             磁盘自愈（可再生日志与浏览器缓存，每 30 分钟）
 ├── wd_workspaces.py          清理无引用的时间戳工作空间登记
@@ -35,7 +36,7 @@ session-sync/
 ├── wd_fs.py                  原子写与文件工具（被上面各脚本引用）
 ├── cdp.mjs                   单文件 CDP 客户端（截图、点按、按需手动刷新）
 ├── clean-meta-ghosts.bat     双击清理幽灵索引（自动挡掉「应用未退出」的情况）
-├── tests/                    规则与行为单测（193 项，python -m unittest discover -s tests）
+├── tests/                    规则与行为单测（216 项，在包目录下 `python -m unittest tests.test_xxx`）
 ├── tools/build_dat.py        打成自解包 .dat（模板 + base64 载荷）
 ├── tools/dat_template.py     .dat 模板：解包 + 交互菜单
 ├── tools/RUN-WB-GUARD.bat    双击入口：自动找 Python 再调 dat
@@ -188,8 +189,33 @@ python wd_shadow.py --force --apply --limit 3   # 先拿 3 个小会话试手
 | --- | --- | --- |
 | 清工作空间登记 | `wd_workspaces.py --apply` | 删除「无活跃会话引用 + 超 24 小时未打开」的时间戳目录登记，91 → 37 条；**不动磁盘文件** |
 | 清空壳会话 | `wd_unify.py --prune-empty --hours 48 --apply` | 软删零内容且超 48 小时的空壳任务 |
+| 清孤儿用量行 | `wd_softdel.py --purge-orphan-usage --yes` | 删掉 `session_usage` 里指向已不存在会话的行，无读取路径会命中 |
 
-两者都可用各自的 `--undo` 整批还原。
+三条都可用各自的 `--undo` / 整库备份还原。注意第二条自己在**制造**软删积压（见下节），所以第三条必须常驻。
+
+## 软删积压（wd_softdel.py）
+
+官方侧边栏的「删除」只写 `sessions.deleted_at`，**不删任何东西**；面板（WorkDaddy 会话页）的删除走 `/api/sessions/delete`，才清文件。同一次「删除」，两条路的结果差一整套数据：
+
+| 位置 | 软删后剩下什么 | 本机实测 |
+| --- | --- | --- |
+| `sessions` | 行永久留在表里，参与每次全表扫描 | 388 / 539 条（72%） |
+| `session_usage` | 上下文用量环没人回收 | 90 行指向软删会话 |
+| 11 处派生文件 | 转录、changes-detail、file-tree-manifests 等一个不少 | 280 条仍有落盘，788 个节点，90 MB |
+
+而且 `wd_unify --prune-empty` 用的也是软删，所以这套积压是**持续产生**的，只清一次几个月后原样长回来。收敛分三层，风险从低到高：
+
+```bash
+python wd_softdel.py                                    # 只读：积压多少、能回收多少
+python wd_softdel.py --purge-orphan-usage --yes         # 第一层：清孤儿用量行（近乎零风险）
+python wd_softdel.py --prune --older-than 7d --yes      # 第二层：硬删过期软删会话（不可逆）
+python wd_softdel.py --prune --older-than 30d --limit 20 --yes   # 更保守：只动 30 天前，单批 20
+python wd_audit.py --fix                                # 第三层：退出客户端后清 autoCopy 幽灵索引
+```
+
+第二层的护栏：默认只读、必须 `--yes`、写前 `VACUUM INTO` 整库备份、单批默认 50 条、逐条写 `backups/softdel-*.ndjson`、写库语句里再带一次 `AND deleted_at IS NOT NULL`（判据写错也碰不到活跃会话）、文件只删 11 处白名单且必须落在 `~/.workbuddy` 之下、名字与 id 严格对应。
+
+判据与阈值都写在 `wd_softdel.py` 顶部：宽限期 7 天、单批 50、体检里软删超 200 条或孤儿 usage 超 100 行才告警。
 
 ## 卸载
 
@@ -252,7 +278,7 @@ Get-ChildItem .\backups | Sort-Object Name
 - 界面刷新交给 WorkDaddy：客户端 daemon 在账号切换时自行经 CDP 重载窗口（切号后约 0.5 秒），并在同步类操作后调用官方 `conversations.ensureList()` 刷列表。本包不做整页 reload，避免切号后连续白屏两次。需要手动刷新时执行 `node cdp.mjs eval "location.reload()"`。
 - 由此带来的一点取舍：本包在切号后写入的去重结果（SQLite）不会被客户端即时看见，需等下一次客户端刷新或手动刷新才显示。
 - `wd_audit.py --fix` 会剔除 `meta.json` 里指向已软删会话的「已标记」索引。该操作建议在 WorkBuddy 完全退出时执行，本包不自动调用。脚本内的进程检查会直接拒绝（退出码 3），不会写出半截 `meta.json`。为省掉手敲路径，同目录提供 `fix_audit.cmd`：先打印只读报告，再执行 `--fix`，最后停住显示退出码；运行前须完全退出 WorkBuddy（含托盘图标）。
-- 体检的 13 项覆盖「计划任务 / 进程 / 补丁完整性 / 库完整性 / 库结构 / 复制索引残留 / 活跃会话 / 定时任务 / 日志 / 备份 / 会话附属数据 / 封口日志 / 数据增量」，加上五个按会话只增不减的目录（`changes-detail`、`blobs`、`cache`、`file-tree-manifests`、`traces`）。这五项合计超 2 GB 或任一单项超 1 GB 才告警 —— 阈值刻意放宽，只在明显失控时说话。不监控 `projects`（转录是核心资产，本就该大）与 `binaries`/`plugins`（程序本体按版本整体替换，不随使用累积）。
+- 体检的 14 项覆盖「计划任务 / 进程 / 补丁完整性 / 库完整性 / 库结构 / 复制索引残留 / 软删积压 / 活跃会话 / 定时任务 / 日志 / 备份 / 会话附属数据 / 封口日志 / 数据增量」，加上五个按会话只增不减的目录（`changes-detail`、`blobs`、`cache`、`file-tree-manifests`、`traces`）。这五项合计超 2 GB 或任一单项超 1 GB 才告警 —— 阈值刻意放宽，只在明显失控时说话。不监控 `projects`（转录是核心资产，本就该大）与 `binaries`/`plugins`（程序本体按版本整体替换，不随使用累积）。
 - `wd_unify.py` 没有 argparse：不带参数直接执行，`--help` 会被当成普通参数忽略。其余脚本都支持 `-h`。
 - `wd_unify.py --apply` 带写库互斥：守护的定时任务正在写时，手动执行会打印「另一进程正在写库」并返回 3，等几十秒重试即可。
 
