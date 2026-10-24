@@ -53,6 +53,26 @@ import wdconfig as C
 
 GRACE_DAYS = 7          # 软删后至少留这么久，误删还能从备份捞回来
 BATCH_LIMIT = 50        # 单次 --prune 的上限；积压多时分几批跑，每批都有备份
+MIN_TS_MS = 1           # 小于等于它的是哨兵值（同步侧写来的 -1 = 已删但无本地时间）
+
+
+def fmt_stamp(ms):
+    """把毫秒时间戳格式化成 月-日。
+
+    哨兵值不能直接喂 fromtimestamp：-1 会落到 1970 之前，Windows 上抛
+    OSError [Errno 22]。这类行的删除时刻本来就未知，如实说「时间未知」
+    比编一个 1969 年的日期更诚实。
+    """
+    try:
+        ms = int(ms)
+    except (TypeError, ValueError):
+        return "时间未知"
+    if ms < MIN_TS_MS:
+        return "时间未知"
+    try:
+        return datetime.datetime.fromtimestamp(ms / 1000).strftime("%m-%d")
+    except (OSError, OverflowError, ValueError):
+        return "时间未知"
 SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 # 与 daemon.js 的 deleteSessionFiles() 一一对应。两边任何一处改了都要同步，
@@ -174,7 +194,10 @@ def counts(conn=None, index=None):
     with_files = [r for r in soft if idx.get(r[0])]
     bytes_ = sum(node_size(p) for r in with_files for p in idx[r[0]])
     cutoff = now_ms() - GRACE_DAYS * 86400000
-    due = [r for r in soft if (r[4] or 0) <= cutoff]
+    # 哨兵（<=0）的删除时刻未知，不能凭「值很小」就当成过期 —— 那样是按一个
+    # 编出来的时间在删别人的数据。单独计数，等人工确认。
+    due = [r for r in soft if MIN_TS_MS <= (r[4] or 0) <= cutoff]
+    unknown = [r for r in soft if (r[4] or 0) < MIN_TS_MS]
 
     return {
         "soft": len(soft),
@@ -186,6 +209,7 @@ def counts(conn=None, index=None):
         "soft_file_nodes": sum(len(idx[r[0]]) for r in with_files),
         "soft_bytes": bytes_,
         "due": len(due),
+        "unknown_time": len(unknown),
         "grace_days": GRACE_DAYS,
     }
 
@@ -270,16 +294,20 @@ def prune_soft(conn, older_than_ms, apply=False, limit=BATCH_LIMIT, index=None, 
     """硬删「软删已过宽限期」的会话：文件 → usage → 行。"""
     rows = conn.execute(
         "SELECT id, user_id, title, cwd, deleted_at FROM sessions "
-        "WHERE deleted_at IS NOT NULL AND deleted_at <= ? "
-        "ORDER BY deleted_at LIMIT ?", (older_than_ms, limit)).fetchall()
+        "WHERE deleted_at IS NOT NULL AND deleted_at >= ? AND deleted_at <= ? "
+        "ORDER BY deleted_at LIMIT ?", (MIN_TS_MS, older_than_ms, limit)).fetchall()
+    skipped = conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+        (MIN_TS_MS,)).fetchone()[0]
     idx = index if index is not None else build_index(wb)
     print("到期可清理（软删超 %d 天）：%d 条%s"
           % (GRACE_DAYS, len(rows), "" if len(rows) < limit else "（受单批 %d 上限约束）" % limit))
     for r in rows[:10]:
-        stamp = datetime.datetime.fromtimestamp((r[4] or 0) / 1000).strftime("%m-%d")
-        print("   %s %s  %s" % (stamp, r[0][:8], (r[2] or "(无标题)")[:34]))
+        print("   %s %s  %s" % (fmt_stamp(r[4]), r[0][:8], (r[2] or "(无标题)")[:34]))
     if len(rows) > 10:
         print("   ……另有 %d 条" % (len(rows) - 10))
+    if skipped:
+        print("   跳过 %d 条删除时刻未知的（deleted_at 是哨兵值，不作过期处理）" % skipped)
     if not rows:
         return {"pruned": 0, "files": 0, "freed": 0}
     if not apply:
@@ -306,9 +334,10 @@ def prune_soft(conn, older_than_ms, apply=False, limit=BATCH_LIMIT, index=None, 
             }, ensure_ascii=False) + "\n")
             log.flush()
     conn.executemany("DELETE FROM session_usage WHERE session_id=?", [(s,) for s in ids])
-    # 写库语句再带一次判据：判据若被改错，这一句仍不会碰到活跃会话
-    conn.executemany("DELETE FROM sessions WHERE id=? AND deleted_at IS NOT NULL",
-                     [(s,) for s in ids])
+    # 写库语句再带一次判据：判据若被改错，这一句仍不会碰到活跃会话与哨兵行
+    conn.executemany(
+        "DELETE FROM sessions WHERE id=? AND deleted_at IS NOT NULL AND deleted_at >= ?",
+        [(s, MIN_TS_MS) for s in ids])
     conn.commit()
     print("已清理 %d 条会话 / %d 个文件节点 / 释放 %.1f MB" % (len(ids), files, freed / 1048576))
     print("明细：%s" % log_path)
@@ -336,7 +365,10 @@ def report(n):
           % (n["usage_total"], n["soft_usage"], n["orphan_usage"]))
     print("软删落盘：%d 条仍有文件，共 %d 个节点，约 %.1f MB"
           % (n["soft_with_files"], n["soft_file_nodes"], n["soft_bytes"] / 1048576))
-    print("到期可清理：%d 条" % n["due"])
+    print("到期可清理：%d 条%s"
+          % (n["due"],
+             "（另有 %d 条删除时刻未知，不自动处理）" % n["unknown_time"]
+             if n.get("unknown_time") else ""))
     state, why = judge(n)
     print("判定：%s（%s）" % ({"ok": "达标", "warn": "告警"}[state], why))
 

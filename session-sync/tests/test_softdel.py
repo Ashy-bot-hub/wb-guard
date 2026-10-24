@@ -139,6 +139,46 @@ class CountsTest(Base):
         self.assertEqual(S.judge({"soft": 5, "orphan_usage": 101})[0], "warn")
 
 
+class SentinelTest(Base):
+    """同步侧会把「已删但无本地时间」写成 -1。
+
+    这类行的删除时刻是未知的：既不能凭 -1 就当成「很久以前删的」硬删掉，
+    也不能让格式化炸掉整个报告（Windows 上 -1 落到 1970 之前会抛 OSError）。
+    """
+
+    def add_sentinel(self, sid, value=-1):
+        self.conn.execute(
+            "INSERT INTO sessions (id,cwd,user_id,title,status,created_at,updated_at,"
+            "last_activity_at,deleted_at,is_playground,is_background_automation) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0,0)",
+            (sid, "", "u1", "t", "completed", self.now, self.now, self.now, value))
+        self.conn.commit()
+
+    def test_fmt_stamp_survives_sentinel(self):
+        self.assertEqual(S.fmt_stamp(-1), "时间未知")
+        self.assertEqual(S.fmt_stamp(0), "时间未知")
+        self.assertEqual(S.fmt_stamp(None), "时间未知")
+        self.assertRegex(S.fmt_stamp(self.now), r"^\d{2}-\d{2}$")
+
+    def test_sentinel_counted_but_not_due(self):
+        self.add(sid(), deleted_days_ago=30)
+        self.add_sentinel(sid())
+        n = S.counts(self.conn, index={})
+        self.assertEqual((n["soft"], n["due"], n["unknown_time"]), (2, 1, 1))
+
+    def test_prune_skips_sentinel_and_still_reports(self):
+        due, sentinel = sid(), sid()
+        self.add(due, deleted_days_ago=30)
+        self.add_sentinel(sentinel)
+        # 传一个极晚的 cutoff：只要 deleted_at 落在有效区间内就会被选中
+        r = S.prune_soft(self.conn, S.now_ms() + 1, apply=True, do_backup=False)
+        self.assertEqual(r["pruned"], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM sessions WHERE id=?",
+                              (sentinel,)).fetchone()[0], 1, "哨兵行不该被硬删")
+        self.assertEqual(S.judge({"soft": 5, "orphan_usage": 101})[0], "warn")
+
+
 class SafetyTest(Base):
     def test_live_session_never_touched(self):
         s = sid()

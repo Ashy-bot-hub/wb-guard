@@ -534,7 +534,17 @@ def chk_disk():
     logs, today, hot = _log_stats()
     # 判定只看「清理脚本能动的那部分」：仍在写的文件删不掉，把它算进超标
     # 会得到永远无法达标的告警；完全不看又会漏报真实的日志堆积。
-    control = max(0.0, logs - hot)
+    #
+    # 口径必须取 wd_janitor 的扫描结果，不能自己按「30 分钟内没动过 = 可回收」算。
+    # 保留策略是「今天 + 昨天」，昨天的量再多脚本也不会动，按前一种算法会把它
+    # 算成可回收 —— 本机就因此长期报「可回收 602 MB > 预算 420 MB」而永远清不掉，
+    # 告警一旦无法消除，就等于没有告警。取不到计划时退回旧算法，只影响精度。
+    try:
+        control = float(sum(sz for _p, sz, _w in J.scan()) / 1048576)
+        basis = "按回收策略"
+    except Exception:                              # noqa: BLE001
+        control = max(0.0, logs - hot)
+        basis = "按闲置时间（估算）"
     # 三档与文件头的表格一致：≤ 预算（清理目标）达标，≤ 2 倍告警，再高故障。
     # 原实现把 1.5 倍当成了故障线、2 倍算出后从未使用（pyflakes 抓到的
     # 「assigned but never used」），实际效果是把告警区间压掉一半 ——
@@ -542,9 +552,9 @@ def chk_disk():
     fail = LOG_BUDGET * 2
     st = OK if control <= LOG_BUDGET else (WARN if control <= fail else FAIL)
     rows.append({"name": "客户端日志", "status": st,
-                 "detail": "%.0f MB = 在写不可删 %.0f MB（%d 分钟内）+ 可回收 %.0f MB"
+                 "detail": "%.0f MB = 在写不可删 %.0f MB（%d 分钟内）+ %s可回收 %.0f MB"
                            "（预算 %d MB，故障线 %d MB；今天合计 %.0f MB）"
-                           % (logs, hot, HOT_IDLE_MIN, control, LOG_BUDGET, fail, today)})
+                           % (logs, hot, HOT_IDLE_MIN, basis, control, LOG_BUDGET, fail, today)})
     # 两个候选目录在「包即部署目录」的布局下是同一个路径（SYNC 由 _sync_dir 算出，
     # 没有兄弟 _session-sync 时就等于 C.HERE，于是 SYNC/backups 就是 C.BACKUP）。
     # 两个备份目录可能指向同一处，直接相加会把同一份 689.6 MB 算成 1379 MB：
