@@ -29,6 +29,7 @@ session-sync/
 ├── wd_unify.py               转录存储层合并（内容可覆盖时共享 inode + 去重 + 状态纠正 + 清空壳）
 ├── wd_audit.py               体检「已标记」幽灵索引（counts() 供体检复用；--fix 需应用已退出）
 ├── wd_softdel.py             软删积压核对与收敛（官方界面只软删：行/用量/派生文件全留）
+├── wd_orphans.py             孤儿派生文件回收 + 空工作目录收尾（摘到 archive/，可回放）
 ├── wd_watch.py               守护主程序（切换检测 / 巡检 / 数据层维护）
 ├── wd_janitor.py             磁盘自愈（可再生日志与浏览器缓存，每 30 分钟）
 ├── wd_workspaces.py          清理无引用的时间戳工作空间登记
@@ -36,7 +37,8 @@ session-sync/
 ├── wd_fs.py                  原子写与文件工具（被上面各脚本引用）
 ├── cdp.mjs                   单文件 CDP 客户端（截图、点按、按需手动刷新）
 ├── clean-meta-ghosts.bat     双击清理幽灵索引（自动挡掉「应用未退出」的情况）
-├── tests/                    规则与行为单测（216 项，在包目录下 `python -m unittest tests.test_xxx`）
+├── tests/                    规则与行为单测（243 项，在包目录下 `python -m unittest tests.test_xxx`）
+├── archive/                  从数据区摘出来的东西（`orphans-<stamp>/` + manifest，可回放）
 ├── tools/build_dat.py        打成自解包 .dat（模板 + base64 载荷）
 ├── tools/dat_template.py     .dat 模板：解包 + 交互菜单
 ├── tools/RUN-WB-GUARD.bat    双击入口：自动找 Python 再调 dat
@@ -217,6 +219,53 @@ python wd_audit.py --fix                                # 第三层：退出客�
 
 判据与阈值都写在 `wd_softdel.py` 顶部：宽限期 7 天、单批 50、体检里软删超 200 条或孤儿 usage 超 100 行才告警。
 
+## 孤儿派生文件（wd_orphans.py）
+
+上一节管「还在表里、只是被打了删除标记」的会话。这一节管另一半：**表里已经没有这一行，磁盘上的派生数据还留着**。
+
+产生原因是删除实现分两代。1.2.18 之前（以及面板补丁 r5 之前）的删除只清 `projects/<proj>/<id>.jsonl` 与会话行，另外 9 处原地不动。补丁 r6 把 11 个位置补齐后，**新删的会话不再产生孤儿**（`verify_files.py` 实测残留 0），但历史留下的仍在盘上。
+
+本机清理前实测（2026-10-24）：
+
+| 类别 | 数量 | 体积 |
+| --- | --- | --- |
+| `changes-detail/<id>/` | 36 | 62.4 MB |
+| `file-tree-manifests/<id>.json` | 51 | 19.0 MB |
+| `changes-index/<id>.json` | 36 | 2.1 MB |
+| `workspace/sessions/<id>/` | 2 | 4.4 MB |
+| `<id>.file-rollback.ndjson` | 47 | 0.0 MB |
+| `artifact-index` / `file-history` / `.meta.json` / 会话目录 | 4 | 0.0 MB |
+| **合计** | **176** | **87.9 MB** |
+
+其中 62.4 MB 集中在**一个**会话的 `changes-detail` 上。
+
+```bash
+python wd_orphans.py                              # 只读：多少、多大、分布
+python wd_orphans.py --apply                      # 摘到 archive/orphans-<stamp>/（不直删）
+python wd_orphans.py --prune-empty-cwd --apply    # 顺带收掉 projects/ 下已空的 <编码cwd>
+python wd_orphans.py --list-archive               # 看归档批次
+python wd_orphans.py --restore 20261024-173801    # 原路放回
+python wd_orphans.py --purge-archive --older-than 7   # 归档满 7 天后才真删
+```
+
+判据只有一条：节点名必须是 `<uuid>` 或 `<uuid><已知后缀>`，且该 uuid 不在 `sessions` 表。**软删行不算孤儿**（那是上一节的管辖范围，两边判据互补、不重叠）。为此配了三道护栏：
+
+1. 只扫白名单位置。`projects/<编码cwd>/` 是工作目录编码，名字不是 uuid，不会被误认成会话；
+2. `.jsonl` 转录默认只报告不处理 —— 那是核心资产，孤儿转录要人确认；
+3. 30 分钟内动过的不碰：客户端先落文件后写库，那段时间文件暂时「无主」。
+
+`--prune-empty-cwd` 收的是删掉项目最后一条会话后留下的 `0 字节` 空目录（本机 134 个）。门槛 24 小时闲置，且只用 `os.rmdir` —— 非空目录会自己失败，不可能误删内容。
+
+## 备份保留策略（统一口径）
+
+同一批快照被三个入口管：`wd_unify.py` 收尾、`wd_prune_backups.py` 手动、守护每 6 小时定时。此前各写各的（unify 留 3 批、脚本默认每目录 1 个），谁后跑谁说了算，保留份数在 1 和 3 之间来回跳。
+
+现在只有 `wdconfig.BACKUP_KEEP`（每目录 2 个）与 `BACKUP_MIN_GLOBAL`（全局至少 2 个）两个常量，三处调同一个 `wd_prune_backups.prune()`：
+
+- **2 份而不是 1 份**：最新那份可能是「写一半」或「操作失败时」拍的，真正能回滚的往往是上一份；
+- **全局下限 2**：多个目录各留若干，仍可能因为某个目录被删而只剩 1 个回滚点；
+- 删前逐个 `pragma quick_check`，坏的**不删**——那是要人看的证据。
+
 ## 卸载
 
 两个层次，按需要选：
@@ -278,7 +327,7 @@ Get-ChildItem .\backups | Sort-Object Name
 - 界面刷新交给 WorkDaddy：客户端 daemon 在账号切换时自行经 CDP 重载窗口（切号后约 0.5 秒），并在同步类操作后调用官方 `conversations.ensureList()` 刷列表。本包不做整页 reload，避免切号后连续白屏两次。需要手动刷新时执行 `node cdp.mjs eval "location.reload()"`。
 - 由此带来的一点取舍：本包在切号后写入的去重结果（SQLite）不会被客户端即时看见，需等下一次客户端刷新或手动刷新才显示。
 - `wd_audit.py --fix` 会剔除 `meta.json` 里指向已软删会话的「已标记」索引。该操作建议在 WorkBuddy 完全退出时执行，本包不自动调用。脚本内的进程检查会直接拒绝（退出码 3），不会写出半截 `meta.json`。为省掉手敲路径，同目录提供 `fix_audit.cmd`：先打印只读报告，再执行 `--fix`，最后停住显示退出码；运行前须完全退出 WorkBuddy（含托盘图标）。
-- 体检的 14 项覆盖「计划任务 / 进程 / 补丁完整性 / 库完整性 / 库结构 / 复制索引残留 / 软删积压 / 活跃会话 / 定时任务 / 日志 / 备份 / 会话附属数据 / 封口日志 / 数据增量」，加上五个按会话只增不减的目录（`changes-detail`、`blobs`、`cache`、`file-tree-manifests`、`traces`）。这五项合计超 2 GB 或任一单项超 1 GB 才告警 —— 阈值刻意放宽，只在明显失控时说话。不监控 `projects`（转录是核心资产，本就该大）与 `binaries`/`plugins`（程序本体按版本整体替换，不随使用累积）。
+- 体检的 15 项覆盖「计划任务 / 进程 / 补丁完整性 / 库完整性 / 库结构 / 复制索引残留 / 软删积压 / 孤儿派生文件 / 活跃会话 / 定时任务 / 日志 / 备份 / 会话附属数据 / 封口日志 / 数据增量」，加上五个按会话只增不减的目录（`changes-detail`、`blobs`、`cache`、`file-tree-manifests`、`traces`）。这五项合计超 2 GB 或任一单项超 1 GB 才告警 —— 阈值刻意放宽，只在明显失控时说话。不监控 `projects`（转录是核心资产，本就该大）与 `binaries`/`plugins`（程序本体按版本整体替换，不随使用累积）。
 - `wd_unify.py` 没有 argparse：不带参数直接执行，`--help` 会被当成普通参数忽略。其余脚本都支持 `-h`。
 - `wd_unify.py --apply` 带写库互斥：守护的定时任务正在写时，手动执行会打印「另一进程正在写库」并返回 3，等几十秒重试即可。
 

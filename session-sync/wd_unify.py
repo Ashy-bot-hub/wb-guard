@@ -37,11 +37,11 @@ import sys
 
 import wdconfig as C
 import wd_fs as F
+import wd_prune_backups as PB
 
 BACKUP = os.path.join(C.BACKUP, "lineage")
 REG = os.path.join(C.HERE, "lineage-registry.json")
 
-KEEP_BATCHES = 3          # 备份批次上限；设 0 关闭自动清理
 STALE_HOURS = 2           # 超过这个时长没有任何写入，就认定状态是残留而非真实进行中
 CHUNK = 1 << 20           # 比较内容时的读取块
 
@@ -360,39 +360,25 @@ def report(groups_multi, relink, diverged, dupes, status_fix, stale, st):
             print("  … 另有 %d 条" % (len(stale) - 20))
 
 
-def prune_backups(keep):
-    """只保留最近 keep 个批次。每批约 30 MB（DB 11 MB + 转录副本）。"""
-    if keep <= 0 or not os.path.isdir(BACKUP):
+def prune_old_backups():
+    """按全局统一口径回收旧备份（实现在 wd_prune_backups.prune）。
+
+    以前这里自带一份「只留最近 3 批」的实现，与 `wd_prune_backups.py` 的
+    「每目录 1 个 / 全局至少 2 个」对同一批文件轮流判：unify 刚放回 3 批，
+    定时回收又砍到 1 个，谁后跑谁说了算。现在保留数只有 `wdconfig` 一份，
+    两处调同一个函数，行为可预测。
+    """
+    if not os.path.isdir(BACKUP):
         return
-    stamps = sorted(d for d in os.listdir(BACKUP)
-                    if os.path.isdir(os.path.join(BACKUP, d)))
-    dead = stamps[:-keep] if len(stamps) > keep else []
-    freed = 0
-    for st in dead:
-        d = os.path.join(BACKUP, st)
-        for root, _dirs, files in os.walk(d):
-            for f in files:
-                try:
-                    freed += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-        try:
-            shutil.rmtree(d)
-        except OSError as e:
-            print("  清理旧批次失败 %s: %s" % (st, e))
-            continue
-        db = os.path.join(BACKUP, "workbuddy-pre-lineage-%s.db" % st)
-        if os.path.exists(db):
-            try:
-                freed += os.path.getsize(db)
-                os.remove(db)
-            except OSError:
-                pass
-        print("  已清理旧批次 %s" % st)
-    if freed:
-        print("  释放 %.1f MB（保留最近 %d 批）" % (freed / 1048576.0, keep))
-
-
+    try:
+        r = PB.prune(apply=True, quiet=True)
+    except Exception as e:                       # noqa: BLE001
+        print("  备份回收跳过：%r" % e)
+        return
+    if r.get("freed"):
+        print("  备份回收 %.1f MB（每目录保留 %d 个，全局至少 %d 个）"
+              % (r["freed"] / 1048576.0, r.get("keep", C.BACKUP_KEEP),
+                 r.get("min_global", C.BACKUP_MIN_GLOBAL)))
 def prune_empty(conn, apply=False, hours=1):
     """软删零内容空壳会话。
 
@@ -580,7 +566,7 @@ def main():
     save_hist(hist)
     print("\n登记写入：%s" % REG)
 
-    prune_backups(KEEP_BATCHES)
+    prune_old_backups()
     return 0
 
 

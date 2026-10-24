@@ -30,6 +30,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BACKUP = os.path.join(HERE, "backups")
 LOGS = os.path.join(HERE, "logs")
 OVERRIDE = os.path.join(HERE, "accounts.json")   # 可选：手工指定参与镜像的账号
+ARCHIVE = os.path.join(HERE, "archive")          # 从数据区摘出来的东西先落这里，不直删
+
+# 备份保留策略 —— 全项目唯一口径，三个入口（wd_prune_backups / wd_unify /
+# wd_watch 定时回收）都读这里，禁止各自写死。
+#
+# keep=2 而不是 1：最新那份可能是「刚写完一半」或「操作失败时」拍的，真正能
+# 回滚的往往是上一份。留 1 份等于没有冗余，留 3 份以上则是拿空间换心理安慰。
+# min_global=2：多个目录各留 keep 个，仍可能因目录被删而整体只剩 1 个回滚点，
+# 这条下限兜住那种情况。
+BACKUP_KEEP = 2               # 每个目录保留最新几个快照单元
+BACKUP_MIN_GLOBAL = 2         # 全局（跨备份目录）至少保留几个快照单元
 
 def _resolve_cdp_port(default=9222):
     """CDP 端口解析：环境变量 -> 客户端自写的 cdp-port.json -> 默认值。

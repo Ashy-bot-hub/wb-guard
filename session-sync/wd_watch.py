@@ -204,14 +204,15 @@ BAK_EVERY = 6 * 3600
 def prune_backups():
     """备份目录涨过头就回收过期快照。
 
-    unify 每批备份一份转录加一份库，单批约 30 MB，保留 3 批；客户端自己也
-    会往 ~/.workbuddy/backups 里放安装前快照。实测堆到 690 MB（体检故障线
+    unify 每批备份一份转录加一份库，单批约 30 MB；客户端自己也会往
+    ~/.workbuddy/backups 里放安装前快照。实测堆到 690 MB（体检故障线
     600 MB）时没有任何自动回收环节 —— 只有人想起来才手动跑清理脚本。
     清理不该靠记性。
 
     阈值 280 MB 而不是「每次都清」：刚产生的两批备份是切号后唯一的回滚依据，
-    频繁删除等于把保护网撤掉。超阈值时才按脚本自带的保留策略（最近 2 个）
-    回收，行为与手动执行完全一致。
+    频繁删除等于把保护网撤掉。超阈值时才按 `wdconfig.BACKUP_KEEP` /
+    `BACKUP_MIN_GLOBAL` 回收 —— 与 `wd_unify` 收尾、手动执行脚本三处同一口径，
+    不再各写一套默认值。
     """
     now = time.time()
     if now - prune_backups.last < BAK_EVERY:

@@ -1,0 +1,10 @@
+# 运行时产物：备份快照、日志、归档区都在本机按需生成，不入库
+session-sync/backups/
+session-sync/logs/
+session-sync/archive/
+**/__pycache__/
+*.pyc
+
+# 客户端安装目录的临时产物
+*.tmp
+*.log

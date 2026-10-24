@@ -50,6 +50,7 @@ import wd_db_maintain as D
 import wd_janitor as J
 import wd_shadow as S
 import wd_softdel as SD
+import wd_orphans as O
 import wdrules as R
 
 # 任务名 → 当前包期望它跑的脚本。只校验「任务存在」是不够的：升级时漏改
@@ -450,6 +451,35 @@ def chk_softdel():
              "status": {"ok": OK, "warn": WARN, "fail": FAIL}[state], "detail": detail}]
 
 
+def chk_orphans():
+    """孤儿派生文件：`sessions` 里已没有对应行的会话附属数据。
+
+    与「补丁完整性」互补 —— 那一项查标记在不在，这一项查**结果对不对**。
+    补丁 r5 之前删会话只删转录和会话行，`changes-detail`、`file-tree-manifests`
+    等原地不动；本机实测攒到 176 个 / 87.9 MB，其中一个会话的 changes-detail
+    单独 59 MB。清过之后若又长出孤儿，说明删除链路又漏了一处，比等下次删会话
+    才发现要早。
+
+    只读扫描，不动任何文件；收敛靠 `wd_orphans.py --apply`（摘到归档区，不直删）。
+    """
+    try:
+        known = O.known_ids()
+        rows = O.scan(known)
+    except Exception as e:                          # noqa: BLE001
+        return [{"name": "孤儿派生文件", "status": WARN, "detail": "扫描失败：%s" % e}]
+    todo = [r for r in rows if not r["transcript"]]
+    trans = len(rows) - len(todo)
+    if not todo:
+        detail = "无（在册 %d 条）" % len(known)
+        if trans:
+            detail += "；孤儿转录 %d 个待人工确认" % trans
+        return [{"name": "孤儿派生文件", "status": OK, "detail": detail}]
+    return [{"name": "孤儿派生文件", "status": WARN,
+             "detail": "%d 个 / %.1f MB 已无会话行；跑 wd_orphans.py 看清单，"
+                       "--apply 摘到归档区（可 --restore 放回）"
+                       % (len(todo), sum(r["size"] for r in todo) / 1048576)}]
+
+
 def chk_db(deep=False):
     r = D.check(deep=deep, full=False)
     rows = [{"name": "库完整性", "status": OK if r["ok"] else FAIL,
@@ -575,6 +605,7 @@ def run(deep=False):
     rows += chk_schema()
     rows += chk_index()
     rows += chk_softdel()
+    rows += chk_orphans()
     db_rows, db = chk_db(deep=deep)
     rows += db_rows
     rows += chk_disk()
