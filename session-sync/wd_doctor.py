@@ -31,10 +31,12 @@
 | 附属数据 | 合计 ≤ 2 GB 且单项 ≤ 1 GB | 超 2 GB | 合计 > 3 GB |
 | 封口日志回收 | 无滞留 | 滞留超 35 分钟 | — |
 | 数据增量 | 五项累积目录合计 ≤ 2 GB 且单项 ≤ 1 GB | 超 2 GB 或单项超 1 GB | 合计 > 3 GB |
+| 补丁完整性 | 两文件都带当前 `wbg-patch rN` 标记，且 daemon 版本在适配清单 | 缺标记 / 版本不在清单 | — |
 """
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -58,9 +60,25 @@ TASK_DIR = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32",
 # 这一层 —— 那时守护就住在包自己身上。写死前者会让新机器第一次体检报「守护未部署」，
 # 而实际正在跑，这正是最容易误导人的那种结论。
 def _sync_dir(here):
-    """有兄弟目录 _session-sync 就用它，否则认为包自己就是部署目录。"""
-    alt = os.path.join(os.path.dirname(here), "_session-sync")
-    return alt if os.path.isdir(alt) else here
+    """有兄弟目录 _session-sync 就用它，否则认为包自己就是部署目录。
+
+    只认一级不够：仓库被收进子目录后（本机 2026-10-24 起源码在
+    `WorkBuddy\\wb-guard\\session-sync`，部署仍在 `WorkBuddy\\_session-sync`），
+    要上跳两级才看得到。判错时的表现是「PID 文件不存在」这类假故障 —— 守护实际
+    正在跑，人却去查一个不存在的部署。所以两级都探，且优先选真的放着 pid 文件
+    的那个目录。
+    """
+    parent = os.path.dirname(here)
+    cands = [os.path.join(parent, "_session-sync"),
+             os.path.join(os.path.dirname(parent), "_session-sync")]
+    for cand in cands:
+        if os.path.isdir(cand) and any(
+                os.path.exists(os.path.join(cand, n)) for n in C.PID_GUARD):
+            return cand
+    for cand in cands:
+        if os.path.isdir(cand):
+            return cand
+    return here
 
 
 SYNC = _sync_dir(C.HERE)
@@ -215,6 +233,125 @@ def chk_procs(live):
                          pid, "存活" if ok else "已不在", os.path.basename(hit))})
     return rows
 
+
+
+# ===== 补丁完整性 =====
+# 客户端自动更新会把安装包整体覆盖到 scripts/ 下，panel-patches 打进去的改动随之
+# 消失。其余检查项都看不出来：库、进程、日志、索引一切正常，唯一的表现是「删除
+# 会话又退回旧行为」，而人往往几天后才发现。2026-10-24 就因为 1.2.17 → 1.2.18 的
+# 升级重打过一次，所以把它做成可判定的一项。
+#
+# 判据不写死在体检里，而是回读 apply.py 的 PATCH_VERSION 与适配版本清单：
+# 两处各写一份版本号，改补丁时必然漏改一处，届时体检报的「达标」就是假的。
+PATCH_REL = os.path.join("panel-patches", "sessions-delete-refresh")
+_PATCH_VER = re.compile(r'^PATCH_VERSION\s*=\s*"([^"]+)"', re.M)
+_PATCH_ACCEPTED = re.compile(r'^ACCEPTED_DAEMON_VERSIONS\s*=\s*\(([^)]*)\)', re.M)
+_PATCH_SEEN = re.compile(r"\[wbg-patch (r\d+)\]")
+_DAEMON_VER = re.compile(r"const DAEMON_VERSION = '([^']+)'")
+
+
+def _script_dirs():
+    """本机可能装 WorkDaddy 的目录，按优先级排列。
+
+    安装位置随发行渠道变化（用户目录安装 / Program Files / 旧名 WorkBuddy），
+    写死一处会在换台机器时得出「找不到安装目录」的假结论。
+    """
+    cands = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        for name in ("WorkDaddy", "WorkBuddy"):
+            cands.append(os.path.join(local, "Programs", name, "scripts"))
+    for root_var in ("ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(root_var, "")
+        if root:
+            for name in ("WorkDaddy", "WorkBuddy"):
+                cands.append(os.path.join(root, name, "resources", "scripts"))
+    return cands
+
+
+def _patch_tool():
+    """panel-patches 可能所在的位置。
+
+    交付包布局是「补丁目录与体检脚本同级」；本机是「源码进 wb-guard 子目录、
+    部署在 _session-sync」的双层布局。只认一种，另一种机器上这项检查会静默跳过 ——
+    跳过比误报更危险：人以为体检覆盖了补丁，其实没有。
+    """
+    here = C.HERE
+    for base in (os.path.dirname(here), os.path.dirname(os.path.dirname(here))):
+        for mid in ("", "wb-guard"):
+            cand = os.path.join(base, mid, PATCH_REL) if mid else \
+                os.path.join(base, PATCH_REL)
+            if os.path.isfile(os.path.join(cand, "apply.py")):
+                return cand
+    return None
+
+
+def chk_patch(scripts_dir=None):
+    """补丁标记与 daemon 版本是否仍与仓库声明一致。
+
+    仓库里没有 panel-patches（只部署了体检脚本的机器）时直接跳过，不报噪声 ——
+    这类机器本来就不指望有补丁。
+    """
+    tool = _patch_tool()
+    if tool is None:
+        return []
+    apply_py = os.path.join(tool, "apply.py")
+    try:
+        with open(apply_py, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError:
+        return [{"name": "补丁完整性", "status": WARN,
+                 "detail": "读不到 %s，无法确认补丁版本" % apply_py}]
+    m_ver = _PATCH_VER.search(src)
+    if not m_ver:
+        return [{"name": "补丁完整性", "status": WARN,
+                 "detail": "apply.py 里找不到 PATCH_VERSION"}]
+    want = m_ver.group(1)
+    m_acc = _PATCH_ACCEPTED.search(src)
+    accepted = re.findall(r'"([^"]+)"', m_acc.group(1)) if m_acc else []
+
+    if scripts_dir is None:
+        for cand in _script_dirs():
+            if os.path.isfile(os.path.join(cand, "inject.js")) and \
+               os.path.isfile(os.path.join(cand, "daemon.js")):
+                scripts_dir = cand
+                break
+    if not scripts_dir or not os.path.isdir(scripts_dir):
+        return [{"name": "补丁完整性", "status": WARN,
+                 "detail": "未找到 WorkDaddy 安装目录（找过 %d 处），无法确认补丁是否在位"
+                           % len(_script_dirs())}]
+
+    texts, missing = {}, []
+    for name in ("inject.js", "daemon.js"):
+        try:
+            with open(os.path.join(scripts_dir, name), encoding="utf-8",
+                      errors="replace") as fh:
+                texts[name] = fh.read()
+        except OSError:
+            texts[name] = ""
+            missing.append(name + "（读不到）")
+    seen = set()
+    for name, text in texts.items():
+        seen.update(_PATCH_SEEN.findall(text))
+        if "[wbg-patch %s]" % want not in text:
+            missing.append(name)
+
+    if missing:
+        state = "测到更早版本 %s" % "/".join(sorted(seen)) if seen else "无任何补丁标记"
+        return [{"name": "补丁完整性", "status": WARN,
+                 "detail": "缺 %s（当前 %s，仓库要求 %s）；客户端更新很可能覆盖了 "
+                           "scripts/，跑 panel-patches 的 apply.py 重打"
+                           % ("、".join(missing), state, want)}]
+
+    dm = _DAEMON_VER.search(texts["daemon.js"][:60000])
+    version = dm.group(1) if dm else "unknown"
+    if accepted and version not in accepted:
+        return [{"name": "补丁完整性", "status": WARN,
+                 "detail": "%s 标记在位，但 daemon 版本 %s 不在适配清单（%s）——"
+                           "上游已变，补丁需重新核对上下文"
+                           % (want, version, " / ".join(accepted))}]
+    return [{"name": "补丁完整性", "status": OK,
+             "detail": "%s 标记在两文件都在；daemon %s" % (want, version)}]
 
 
 # 脚本硬编码依赖的表与列。客户端升级可能改名或删列，届时脚本会在运行时抛
@@ -406,6 +543,7 @@ def run(deep=False):
     rows = []
     rows += chk_tasks()
     rows += chk_procs(live)
+    rows += chk_patch()
     rows += chk_schema()
     rows += chk_index()
     db_rows, db = chk_db(deep=deep)
