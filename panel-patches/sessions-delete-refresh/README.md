@@ -59,6 +59,7 @@
 | 实机产物与验证产物一致性 | 实机 `inject.js` 与源码树补丁产物逐行相同；`daemon.js` 仅差 `DAEMON_VERSION` / `DAEMON_BUILD_ID` 两行 |
 | 实机守护重启 | 终止旧进程后 watchdog 3s 内拉起新进程，`/api/status` 返回 `version 1.2.18`，注入接口返回 `mounted: true`，页面悬浮按钮存在 |
 | 指纹 SQL 在真实库的命中 | 本机库只读抽样 6 组重复指纹：5 组命中数与组内行数相同，1 组多命中 1 行已软删行（属预期，补丁不过滤 `deleted_at`） |
+| 实机端到端级联（真实库、有写入） | 先做 12.20 MB 全库备份，再直插 3 行测试会话（2 行同指纹、1 行 `created_at` 仅差 1ms）。只请求删除其中 1 行：HTTP 200 返回 `{"deleted":2,"requested":1,"cascaded":1}`，同指纹行一并消失，差 1ms 的对照行保留。这 2 行只能来自补丁——直插的行在 `meta.json` 里没有 lineage 映射，上游展开器只会返回请求的那 1 行。测完物理清理，库回到 538 行 / 活跃 150 行，与测试前一致 |
 
 ## 四、现象与根因（1.2.17 时期记录，机制在 1.2.18 未变）
 
@@ -83,6 +84,17 @@ python apply.py
 # 4) daemon.js 的改动需重启 WorkDaddy 守护进程后才生效
 ```
 
+装好之后可以端到端复验级联是否真的生效（会写库，默认只做只读预检）：
+
+```powershell
+python verify_cascade.py          # 只读预检：库路径、守护版本、当前行数
+python verify_cascade.py --yes    # 插 3 行测试会话 → 调真删除接口 → 校验 → 物理清理
+```
+
+`verify_cascade.py` 成功的标志是：接口返回 `deleted=2 requested=1 cascaded=1`，
+同指纹行消失、`created_at` 差 1ms 的对照行保留，清理后库行数与测试前一致。
+删前必定先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
+
 回滚：
 
 ```powershell
@@ -99,6 +111,11 @@ python apply.py --revert
 
 ## 六、已知局限
 
+- 作用域只在面板「删除」（硬删路径）。本补丁改的是 `POST /api/sessions/delete`，该接口执行
+  `DELETE FROM sessions` 并清理文件；WorkBuddy 官方界面里的删除走的是软删（只写 `deleted_at`），
+  不经过本补丁，因此从官方界面删掉的会话仍会在其他账号留下兄弟行。两条删除路径的差异是
+  实测结论（`daemon.js:12220` 为 `DELETE FROM sessions`，`daemon.js:12245` 的
+  `SET deleted_at = NULL` 是「恢复」而非删除）。
 - WorkDaddy 自动更新会覆盖 `scripts/` 下的文件，更新后需重打补丁（本补丁针对 1.2.18）。
 - `is_background_automation=1` 的会话被删除接口显式排除，本补丁不改变该行为。
 - 指纹以 `created_at` 精确到毫秒为准；若上游改写 `created_at` 语义，需重核级联范围。
