@@ -71,6 +71,104 @@ class TestApplyRetry(unittest.TestCase):
             os.rmdir(d)
 
 
+class TestDirFallback(unittest.TestCase):
+    """整目录删不掉时的降级：能删的子项要删掉，别被一个删不掉的文件拖住。
+
+    真实案例：190 MB 的日期目录里有一个 0.9 MB 的文件被安全规则保护，整目录
+    回收站操作整批回滚，一个字节都没收回来。降级后同一场景能收回另外的 189 MB。
+    """
+
+    def _mk(self, n=3, size=100):
+        d = tempfile.mkdtemp(prefix="wd-test-")
+        for i in range(n):
+            with open(os.path.join(d, "a%d.log" % i), "w", encoding="utf-8") as fh:
+                fh.write("x" * size)
+        return d
+
+    def test_sweep_removes_children_when_rmtree_fails(self):
+        d = self._mk()
+        keeper = os.path.join(d, "a1.log")
+
+        def boom(path, *a, **k):
+            raise OSError("整批回滚")
+
+        real_remove = os.remove
+
+        def fake_remove(p, *a, **k):
+            if os.path.normcase(p) == os.path.normcase(keeper):
+                raise OSError("protected")      # 模拟被规则保护的那个文件
+            return real_remove(p, *a, **k)
+
+        try:
+            with mock.patch.object(J.shutil, "rmtree", side_effect=boom), \
+                 mock.patch.object(J.os, "remove", side_effect=fake_remove):
+                ok = J._delete_target(d)
+            self.assertFalse(ok, "目录里还有删不掉的文件 → 不算删干净")
+            self.assertTrue(os.path.exists(keeper), "受保护文件必须留下")
+            self.assertFalse(os.path.exists(os.path.join(d, "a0.log")))
+            self.assertFalse(os.path.exists(os.path.join(d, "a2.log")))
+        finally:
+            for n in os.listdir(d):
+                try:
+                    os.remove(os.path.join(d, n))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
+
+    def test_sweep_removes_empty_dir(self):
+        d = self._mk(2)
+        with mock.patch.object(J.shutil, "rmtree", side_effect=OSError("x")):
+            ok = J._delete_target(d)
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(d), "子项删完后应把空目录也收掉")
+
+    def test_missing_target_is_success(self):
+        d = tempfile.mkdtemp(prefix="wd-test-")
+        try:
+            self.assertTrue(J._delete_target(os.path.join(d, "nope")))
+        finally:
+            os.rmdir(d)
+
+
+class TestApplyIsolation(unittest.TestCase):
+    """一项失败不能让整轮停摆。
+
+    本机删除通道失败状态是进程级的：一个对象删失败后，同进程里后续删除全部
+    被拒。2026-10-24 实测因此 21 项全跳过、回收 0 字节。所以 apply() 必须
+    逐项隔离，并且遇到失败项要继续往下走。
+    """
+
+    def test_failed_item_does_not_stop_the_rest(self):
+        d = tempfile.mkdtemp(prefix="wd-test-")
+        f1, f2 = os.path.join(d, "a.log"), os.path.join(d, "b.log")
+        for f in (f1, f2):
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write("x" * 50)
+        calls = []
+
+        def fake(path):
+            calls.append(path)
+            if path == f1:
+                return False, 0
+            os.remove(path)
+            return True, 50
+
+        try:
+            with mock.patch.object(J, "_delete_one", side_effect=fake):
+                freed, skipped = J.apply([(f1, 50, "坏"), (f2, 50, "好")])
+            self.assertEqual(skipped, [f1])
+            self.assertEqual(freed, 50)
+            self.assertEqual(calls, [f1, f2], "失败项之后必须继续处理")
+            self.assertTrue(os.path.exists(f2) is False)
+        finally:
+            for n in os.listdir(d):
+                os.remove(os.path.join(d, n))
+            os.rmdir(d)
+
+
 class TestThresholds(unittest.TestCase):
     """体检与清理必须同一口径，否则会出现「体检达标但永远删不干净」。"""
 

@@ -37,6 +37,7 @@ import datetime
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 
@@ -47,6 +48,7 @@ import wdrules as R
 
 KEEP_SANDBOX_DAYS = 1      # 昨天的沙箱日志没有诊断价值
 KEEP_APP_DAYS = 2          # 保留今天与昨天
+DELETE_TIMEOUT = 300       # 单个对象的删除上限（秒）；大目录走回收站可能要等
 IDLE_MIN = 30              # 沙箱文件 30 分钟没写入视为进程已退出
 SEALED_MIN = 3             # 已封口的滚动日志只需 3 分钟：同前缀已有更高序号，
                            # 说明写入方已切到新文件，旧文件不会再被追加
@@ -267,38 +269,116 @@ def rotate_own_logs(limit_mb=ROTATE_MB):
     return moved
 
 
+def _sweep_dir(path):
+    """整目录删不掉时的降级：逐个删子项，能删多少算多少。
+
+    触发场景很实在：目录里混着一个删不掉的文件（被安全规则保护、或仍被进程
+    占用），整个 rmtree / 回收站操作会整批回滚 —— 190 MB 的目录因为一个 0.9 MB
+    的文件而一个字节都收不回来。逐个删就把「全有或全无」变成尽力而为。
+    子项删完后再试一次 rmdir：空了就顺手收掉，没空也不报错。
+    """
+    freed = 0
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(path, name)
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                before = dir_size(p)
+                shutil.rmtree(p)
+                freed += before - (dir_size(p) if os.path.isdir(p) else 0)
+            else:
+                size = os.path.getsize(p)
+                os.remove(p)
+                freed += size
+        except OSError:
+            pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+    return freed
+
+
+def _delete_target(path):
+    """真正执行删除（在 --delete-one 子进程里跑），返回是否删干净。
+
+    先试整目录/整文件一次到位；失败则退回逐子项，把能删的删掉。
+    这条路径不能放在主循环里 —— 见 _delete_one 的说明。
+    """
+    if not os.path.exists(path):
+        return True
+    if os.path.isdir(path):
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            pass
+        if os.path.isdir(path):
+            _sweep_dir(path)
+        return not os.path.exists(path)
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        # 客户端对当日会话日志是「写时开、写完关」，删除会随机撞上占用；
+        # 实测同一文件 3 分钟前删失败、3 分钟后删成功，因此重试一次再判失败。
+        time.sleep(1.5)
+        try:
+            os.remove(path)
+            return True
+        except OSError:
+            return False
+
+
+def _delete_one(path):
+    """在独立进程里删掉一个对象，返回实际回收字节。
+
+    为什么非得起子进程：本机的删除通道（回收站 shim）是 fail-closed 的，且
+    失败状态是**进程级**的 —— 一个对象删失败之后，同进程里后面所有删除都会被
+    直接拒绝（实测：整目录回滚一次，接着删另一个目录的亲兄弟文件也报同样的错）。
+    放在主循环里做，等于「一个删不掉的文件让整轮清理停摆」：2026-10-24 实测
+    21 项全部跳过、回收 0 字节，而它们本来能删。每个对象一个进程，坏的那个
+    只毁掉自己。
+    """
+    before = dir_size(path) if os.path.isdir(path) else _filesize(path)
+    try:
+        p = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--delete-one", path],
+            capture_output=True, text=True, timeout=DELETE_TIMEOUT)
+        ok = p.returncode == 0
+    except Exception:                              # noqa: BLE001
+        ok = False
+    after = dir_size(path) if os.path.isdir(path) else _filesize(path)
+    freed = max(0, before - after)
+    if ok and os.path.exists(path) and not (os.path.isdir(path) and not os.listdir(path)):
+        ok = False
+    return ok, freed
+
+
+def _filesize(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
 def apply(items):
     """执行删除，返回 (实际回收字节, 失败项)。
 
-    回收量按「删除前后目录实际大小之差」计。不能用 items 里预算的字节：
-    被进程占用的目录只删掉一部分时 rmtree 会抛 OSError，若按预算累加就会
-    报出根本没释放的数字（2026-10-19 实测：实际释放 335 MB，预算口径只报 10 MB）。
+    回收量按「删除前后实际大小之差」计，不按 items 里预算的字节：被占用的目录
+    只删掉一部分时若按预算累加，就会报出根本没释放的数字（2026-10-19 实测：
+    实际释放 335 MB，预算口径只报 10 MB）。
     """
     freed, skipped = 0, []
     for path, _size, _why in items:
-        try:
-            if os.path.isdir(path):
-                before = dir_size(path)
-                shutil.rmtree(path)          # 尽力删；占用文件会中断
-                freed += before - (dir_size(path) if os.path.isdir(path) else 0)
-            else:
-                size = os.path.getsize(path)
-                os.remove(path)
-                freed += size
-        except OSError:
-            # 中途失败：把已经删掉的部分也计入
-            if not os.path.exists(path):
-                continue
-            # 客户端对当日会话日志是「写时开、写完关」，删除会随机撞上占用；
-            # 实测同一文件 3 分钟前删失败、3 分钟后删成功，因此重试一次再判失败。
-            time.sleep(1.5)
-            try:
-                size = os.path.getsize(path)
-                os.remove(path)
-                freed += size
-                continue
-            except OSError:
-                skipped.append(path)
+        if not os.path.exists(path):
+            continue
+        ok, got = _delete_one(path)
+        freed += got
+        if not ok:
+            skipped.append(path)
     return freed, skipped
 
 
@@ -306,7 +386,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="清理可再生日志与浏览器缓存")
     ap.add_argument("--apply", action="store_true", help="实际删除（默认只报告）")
     ap.add_argument("--json", action="store_true", help="输出 JSON 明细")
+    ap.add_argument("--delete-one", metavar="PATH", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+
+    if a.delete_one:                       # 内部接口：apply() 逐项起子进程用
+        return 0 if _delete_target(a.delete_one) else 1
 
     items = scan()
     total = sum(x[1] for x in items)
