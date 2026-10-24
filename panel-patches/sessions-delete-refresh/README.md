@@ -131,6 +131,16 @@
 | 实机守护重启 | 终止旧进程后 watchdog 3s 内拉起新进程，`/api/status` 返回 `version 1.2.18`，注入接口返回 `mounted: true`，页面悬浮按钮存在 |
 | 指纹 SQL 在真实库的命中 | 本机库只读抽样 6 组重复指纹：5 组命中数与组内行数相同，1 组多命中 1 行已软删行（属预期，补丁不过滤 `deleted_at`） |
 | 实机端到端级联（真实库、有写入） | 先做 12.20 MB 全库备份，再直插 3 行测试会话（2 行同指纹、1 行 `created_at` 仅差 1ms）。只请求删除其中 1 行：HTTP 200 返回 `{"deleted":2,"requested":1,"cascaded":1}`，同指纹行一并消失，差 1ms 的对照行保留。这 2 行只能来自补丁——直插的行在 `meta.json` 里没有 lineage 映射，上游展开器只会返回请求的那 1 行。测完物理清理，库回到 538 行 / 活跃 150 行，与测试前一致 |
+| **面板真实 UI 点删（2026-10-24 补做）** | 此前所有删除验证都直调 `/api/sessions/delete`，**从未点过面板的删除按钮**——「按钮 → 两步确认 → 列表刷新」这条链一直没被验证。用 `ui_delete.mjs` 走真实鼠标事件（`Input.dispatchMouseEvent`，不是 `el.click()`）补测：造 1 条一次性会话 + 11 处落盘全部铺开，开悬浮球 → 会话页 → 批量操作 → 勾选 → 删除所有账号同步副本 → 继续确认 → 永久删除。**6/6 判定通过**：首点标题仍为「删除所有账号的同源会话？/继续确认」；首点后变「再次确认永久删除/永久删除」且弹出「还需再点一次「永久删除」才会执行」；第二次才执行并关窗；执行后有「已删除 1 个会话」；列表行立即消失（`loadSessions()` 刷新生效）。**落盘 11/11 清空、`session_usage` 0 行、`sessions` 行消失** |
+
+### 面板点删验证的两个坑（都会让结论整体失真）
+
+1. **客户端同时有两个 page**：主窗口 + 文档窗口都匹配 `app.asar/renderer`。`cdp.mjs` 原来取列表第一个，第二次跑就打到文档窗口上，探到的 DOM 全是空的（`wbs-*` 节点 0 个），看起来像「面板根本没注入」。已给它加 `WD_CDP_TARGET=<id 前缀|URL 片段>` 与 `list` 子命令。
+2. **测试文件放错目录**：第一轮把 `changes-detail` / `changes-index` / `file-tree-manifests` 造在 `projects/<项目>/` 下，而 daemon 是去**数据根** `~/.workbuddy/` 找的。删除结果 4/9，差点被判成「补丁漏删 5 类文件」。实际是测试现场构造错了——`deleteSessionFiles()` 的 11 处路径必须逐一对照，少对一处就会得出反向结论。
+
+### 已知残留（未修，非空间问题）
+
+删掉某个项目里的最后一条会话后，`projects/<编码后的cwd>/` 会留下**空目录**（`deleteSessionFiles()` 只删按 id 命名的节点，不判断目录是否已空）。本机现有 134 个这样的空目录，合计 0 字节。属整洁度问题而非空间问题，且删除空目录要额外判「是否真是本工具产生的空壳」，暂不改动补丁。
 
 ## 四、现象与根因（1.2.17 时期记录，机制在 1.2.18 未变）
 
@@ -166,6 +176,10 @@ python verify_side_tables.py --yes    # 插 6 会话 + 6 usage + 4 workspaces �
 
 python verify_files.py                # 磁盘文件覆盖的只读预检
 python verify_files.py --yes          # 11 个位置各埋一个文件 → 真删 → 核对残留
+
+# 面板按钮这条链（真实鼠标事件，不是 el.click()）
+set WD_CDP_TARGET=<page id 前缀>      # 客户端有多个窗口时必须指定，否则会打到文档窗口
+node ui_delete.mjs "<要删的会话标题>" run
 ```
 
 `verify_cascade.py` 成功的标志是：接口返回 `deleted=2 requested=1 cascaded=1`，
@@ -173,7 +187,9 @@ python verify_files.py --yes          # 11 个位置各埋一个文件 → 真�
 `verify_side_tables.py` 成功的标志是 9 项断言全过（会话级联、`session_usage` 只剩未请求的那条、
 `workspaces` 四个判据分支各自符合预期）。
 `verify_files.py` 成功的标志是 `filesRemoved=11` 且 11 个探测位置**残留 0**。
-三个脚本删前都先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
+`ui_delete.mjs` 成功会打印 6 条判定（首点不执行 / 首点给提示 / 二次才执行 / 有已删除反馈 / 列表已刷新），
+任一条失败就说明面板这条链没走通；它自己造测试会话与文件，路径与 daemon 的 11 处白名单一致。
+四个脚本删前都先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
 
 回滚：
 

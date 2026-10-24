@@ -1,10 +1,14 @@
 // CDP 客户端：连接 WorkDaddy 渲染进程执行 JS 或截图
 // 用法：
+//   node cdp.mjs list                    列出所有页面（多窗口时用来挑目标）
 //   node cdp.mjs eval "document.title"
 //   node cdp.mjs shot out.png
 //   node cdp.mjs click 60 152
 //   node cdp.mjs run step.js out.png
 // 前提：客户端需以远程调试端口启动（默认 9222，可用环境变量 WD_CDP_PORT 覆盖）
+// 多窗口：客户端可能同时有多个 page（主窗口 + 文档窗口），默认取第一个匹配项，
+// 会打到「不是你要的那个窗口」上——表现为「页面明明有元素，探测结果却是空的」。
+// 用 WD_CDP_TARGET=<id 前缀|URL 片段> 指定。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,10 +35,27 @@ try {
   process.exit(2);
 }
 
-const page = list.find(t => t.type === 'page' && /app\.asar\/renderer/.test(t.url || ''))
-          || list.find(t => t.type === 'page' && /WorkBuddy/i.test(t.title || ''))
-          || list.find(t => t.type === 'page');
+if (cmd === 'list') {
+  list.forEach(t => console.log([t.type, (t.id || '').slice(0, 8),
+    (t.title || '').slice(0, 24), (t.url || '').slice(0, 60)].join(' | ')));
+  process.exit(0);
+}
+
+const want = process.env.WD_CDP_TARGET;
+let page;
+if (want) {
+  page = list.find(t => t.type === 'page' && ((t.id || '').startsWith(want) || (t.url || '').includes(want)));
+  if (!page) {
+    console.error(`WD_CDP_TARGET=${want} 没匹配到页面，用 list 看可选值`);
+    process.exit(1);
+  }
+} else {
+  page = list.find(t => t.type === 'page' && /app\.asar\/renderer/.test(t.url || ''))
+      || list.find(t => t.type === 'page' && /WorkBuddy/i.test(t.title || ''))
+      || list.find(t => t.type === 'page');
+}
 if (!page) { console.error('没有可用页面'); process.exit(1); }
+
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let id = 0;
