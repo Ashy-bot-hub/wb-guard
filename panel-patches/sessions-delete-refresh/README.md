@@ -45,6 +45,28 @@
 `lastOpenedAt` 倒序取 `path`，daemon 自己完全不碰它），所以补丁**只回收因这条会话才存在的目录登记**，
 不碰财务分析、日利润表这类手工目录。两张表任一失败只记日志，不影响删除结果。
 
+### 磁盘：补上上游漏删的 5 类会话派生文件
+
+`deleteSessionFiles` 原来只删 6 类：`projects/<proj>/<id>.jsonl`、`projects/<proj>/<id>/`、
+`workspace/sessions/<id>/`、`tasks/<id>/`、`file-history/<id>/`、`artifact-index/<id>.json`。
+用一个测试会话在 11 个位置各埋一个文件后调真删除接口，实测返回
+`filesRemoved: 6`，**剩下 5 个位置原地不动**：
+
+| 位置 | 内容 | 实测（本机） |
+|---|---|---|
+| `projects/<proj>/<id>.meta.json` | 会话元数据，与 `.jsonl` 同目录 | 残留；孤儿 1 |
+| `projects/<proj>/<id>.file-rollback.ndjson` | 文件回滚记录，同上 | 残留；孤儿 47 |
+| `changes-detail/<id>/` | 变更详情，目录名即会话 id | 残留；孤儿 36 |
+| `changes-index/<id>.json` | 变更索引，`conversationId` 字段即会话 id | 残留；孤儿 36 |
+| `file-tree-manifests/<id>.json` | 文件树清单，`conversationId` 字段即会话 id | 残留；孤儿 51 |
+
+这五处都只属这一条会话（后三处的内部字段 `conversationId` 与文件名一致，已抽查确认），
+会话行删掉后永远不会再被读到。补丁沿用上游同一个 `delOne` 删除（内部仍有
+`isManagedDirectoryNoFollow` / `resolveManagedSessionTarget` 的符号链接与越界校验），
+目录不存在时直接跳过、不报错。
+
+补完再跑同一实验：`filesRemoved: 11`，**残留 0 / 11**。
+
 ### `scripts/inject.js`（面板；重新注入即生效，无需重启）
 
 | 位置 | 改动 |
@@ -103,6 +125,7 @@
 | 上游全量测试 | 1393 项：未打补丁 29 项失败，打补丁同样 29 项失败，差集为空（失败项与补丁无关，多为平台/环境类断言） |
 | 降噪实测（实机） | 重注入后连续 90 秒新增 `[wbscrash]` 0 条（改前该时段为每分钟 3~37 条），同期日志仍在正常写入；主动抛 `Error('wbg-filter-probe-real')` 被正常记录，手工派发 `ResizeObserver loop` 事件被过滤 |
 | 附属表回收（实机、有写入） | 插 6 个会话 + 6 条 `session_usage` + 4 条 `workspaces`，只请求删 4 个：返回 `deleted=5 cascaded=1`；`session_usage` 只剩未请求的那个会话；`workspaces` 四个案例分别命中断言——时间戳目录+旧时间被回收，时间戳目录+刚打开保留，手工目录名保留，仍有活跃会话引用保留。守护日志同时打出「顺带清理工作空间登记 1 条」。跑两轮（临时脚本 + 仓库脚本各一次）均 9/9 通过，清理后库回到 538 / 312 / 35 |
+| 磁盘保真（实机、有写入） | 11 个位置各埋一个探测文件后调真删除接口：打补丁前 `filesRemoved: 6`、残留 5 个位置；打补丁后 `filesRemoved: 11`、**残留 0 / 11**。库里现存对应孤儿：`changes-detail` 36、`changes-index` 36、`file-tree-manifests` 51、`.file-rollback.ndjson` 47、`.meta.json` 1 |
 | `apply.py` 往返 | 应用后回滚，两文件 sha256 与原始完全一致 |
 | 实机产物与验证产物一致性 | 实机 `inject.js` 与源码树补丁产物逐行相同；`daemon.js` 仅差 `DAEMON_VERSION` / `DAEMON_BUILD_ID` 两行 |
 | 实机守护重启 | 终止旧进程后 watchdog 3s 内拉起新进程，`/api/status` 返回 `version 1.2.18`，注入接口返回 `mounted: true`，页面悬浮按钮存在 |
@@ -140,13 +163,17 @@ python verify_cascade.py --yes    # 插 3 行测试会话 → 调真删除接口
 
 python verify_side_tables.py          # 附属表回收的只读预检
 python verify_side_tables.py --yes    # 插 6 会话 + 6 usage + 4 workspaces → 校验 9 项断言
+
+python verify_files.py                # 磁盘文件覆盖的只读预检
+python verify_files.py --yes          # 11 个位置各埋一个文件 → 真删 → 核对残留
 ```
 
 `verify_cascade.py` 成功的标志是：接口返回 `deleted=2 requested=1 cascaded=1`，
 同指纹行消失、`created_at` 差 1ms 的对照行保留，清理后库行数与测试前一致。
 `verify_side_tables.py` 成功的标志是 9 项断言全过（会话级联、`session_usage` 只剩未请求的那条、
 `workspaces` 四个判据分支各自符合预期）。
-两个脚本删前都先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
+`verify_files.py` 成功的标志是 `filesRemoved=11` 且 11 个探测位置**残留 0**。
+三个脚本删前都先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
 
 回滚：
 

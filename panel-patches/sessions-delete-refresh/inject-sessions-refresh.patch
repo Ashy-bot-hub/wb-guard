@@ -1,12 +1,12 @@
 diff --git a/scripts/inject.js b/scripts/inject.js
-index 7387910..56a307c 100644
+index 7387910..13b309a 100644
 --- a/scripts/inject.js
 +++ b/scripts/inject.js
 @@ -1188,6 +1188,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
      // findWbsAdapter 的缓存校验会直接复用旧 shim，导致「修好代码重注入后仍跑旧逻辑」。
      try { delete window.__wbsAnySessionBusy; } catch (_) { window.__wbsAnySessionBusy = null; }
      try { delete window.__wbsAdapter; } catch (e) { window.__wbsAdapter = null; }
-+    // [wbg-patch r5] 本文件被 wb-guard 的 sessions-delete-refresh 补丁修改过。
++    // [wbg-patch r6] 本文件被 wb-guard 的 sessions-delete-refresh 补丁修改过。
 +    // [wbscrash 降噪] 错误钩子必须能随重注入一起换掉：只删标记会留下旧的匿名监听器，
 +    // 结果是新旧两套钩子同时上报。这里先按登记的函数引用解绑，再清标记。
 +    try {

@@ -37,7 +37,7 @@ MARKERS = {
 # 最新版补丁必须具备的标记。缺任一说明本机打的是更早的版本，须先用补丁前备份恢复原版
 # 再重打——新版 hunk 的行号与上下文都变了，无法叠在旧补丁之上。
 # 版本号 `wbg-patch rN`：每次改动补丁内容都要同步 +1，否则老机器会被误判成「已是最新」。
-PATCH_VERSION = "r5"
+PATCH_VERSION = "r6"
 REQUIRED_MARKERS = {
     "inject.js": ("[wbg-patch %s]" % PATCH_VERSION,),
     "daemon.js": ("[wbg-patch %s]" % PATCH_VERSION,),
