@@ -34,13 +34,24 @@
 - 首个查询保持 `SELECT id, user_id FROM sessions` 原样，指纹列用**独立的第二条查询**获取；
 - 指纹查询整体包在 `try/catch` 中：表结构缺列（老库或测试桩）时只跳过级联，主删除流程不受影响。
 
+同一条路由末尾还回收会话留下的两张附属表：
+
+| 表 | 处理 | 判据 |
+|---|---|---|
+| `session_usage` | 删除本次删掉的全部 `session_id` | 无需判据。这张表按 `session_id` 单行存上下文用量环，daemon 与客户端读它**都是** `WHERE session_id = ?`，没有聚合查询，会话不存在后永远不会再命中 |
+| `workspaces` | 只删「本次删掉的一次性时间戳目录」 | 三条同时满足：路径以 `\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}` 结尾、已无 `deleted_at IS NULL` 的会话用它当 cwd、`last_opened_at` 早于 24 小时。与 `session-sync/wd_workspaces.py` 的判据一致 |
+
+`workspaces` 这张表是 WorkBuddy 主程序的「最近打开」列表（`app.asar` 里 `getWorkspaces()` 按
+`lastOpenedAt` 倒序取 `path`，daemon 自己完全不碰它），所以补丁**只回收因这条会话才存在的目录登记**，
+不碰财务分析、日利润表这类手工目录。两张表任一失败只记日志，不影响删除结果。
+
 ### `scripts/inject.js`（面板；重新注入即生效，无需重启）
 
 | 位置 | 改动 |
 |---|---|
-| `WBS_I18N_EN` 字典 | 新增 `还需再点一次「永久删除」才会执行` 的英文映射 |
+| `WBS_I18N_EN` 字典 | 新增 `还需再点一次「永久删除」才会执行` 的英文映射；移除只服务于旧分支的 `含其他账号副本 {n} 个` |
 | `openDeleteModal` 第二步确认 | 给出 toast 提示，避免把「再次确认」当成已执行 |
-| `openDeleteModal` 结果提示 | 用 `deleted - 勾选数` 显示「含同源副本 N 个」 |
+| `openDeleteModal` 结果提示 | 直接读 daemon 回报的 `cascaded`（与 `deleted - 勾选数` 恒等），不再两套算法并存 |
 | `wbsReportErr` 错误钩子 | 取不到 `ev.error` / `ev.reason` 时退回 `ev.message`，并过滤 `ResizeObserver loop` 噪声；监听器改为具名并登记到 `window.__wbsErrListener`，重注入时先解绑再注册 |
 
 面板侧刻意**不**再发 `/api/sessions?range=all` 快照：上游 `session-delete-ui.test.js` 锁定
@@ -68,7 +79,7 @@
 | 删除/会话/国际化相关测试 | 7 个相关测试文件共 112 项：112 项中 111 过、1 失败；未打补丁的干净基线同样 111 过 1 失败（同一项 `native automatic first copy registers destination ownership`），差集为空 |
 | 上游全量测试 | 1393 项：未打补丁 29 项失败，打补丁同样 29 项失败，差集为空（失败项与补丁无关，多为平台/环境类断言） |
 | 降噪实测（实机） | 重注入后连续 90 秒新增 `[wbscrash]` 0 条（改前该时段为每分钟 3~37 条），同期日志仍在正常写入；主动抛 `Error('wbg-filter-probe-real')` 被正常记录，手工派发 `ResizeObserver loop` 事件被过滤 |
-
+| 附属表回收（实机、有写入） | 插 6 个会话 + 6 条 `session_usage` + 4 条 `workspaces`，只请求删 4 个：返回 `deleted=5 cascaded=1`；`session_usage` 只剩未请求的那个会话；`workspaces` 四个案例分别命中断言——时间戳目录+旧时间被回收，时间戳目录+刚打开保留，手工目录名保留，仍有活跃会话引用保留。守护日志同时打出「顺带清理工作空间登记 1 条」。跑两轮（临时脚本 + 仓库脚本各一次）均 9/9 通过，清理后库回到 538 / 312 / 35 |
 | `apply.py` 往返 | 应用后回滚，两文件 sha256 与原始完全一致 |
 | 实机产物与验证产物一致性 | 实机 `inject.js` 与源码树补丁产物逐行相同；`daemon.js` 仅差 `DAEMON_VERSION` / `DAEMON_BUILD_ID` 两行 |
 | 实机守护重启 | 终止旧进程后 watchdog 3s 内拉起新进程，`/api/status` 返回 `version 1.2.18`，注入接口返回 `mounted: true`，页面悬浮按钮存在 |
@@ -98,16 +109,21 @@ python apply.py
 # 4) daemon.js 的改动需重启 WorkDaddy 守护进程后才生效
 ```
 
-装好之后可以端到端复验级联是否真的生效（会写库，默认只做只读预检）：
+装好之后可以端到端复验是否真的生效（会写库，默认只做只读预检）：
 
 ```powershell
 python verify_cascade.py          # 只读预检：库路径、守护版本、当前行数
 python verify_cascade.py --yes    # 插 3 行测试会话 → 调真删除接口 → 校验 → 物理清理
+
+python verify_side_tables.py          # 附属表回收的只读预检
+python verify_side_tables.py --yes    # 插 6 会话 + 6 usage + 4 workspaces → 校验 9 项断言
 ```
 
 `verify_cascade.py` 成功的标志是：接口返回 `deleted=2 requested=1 cascaded=1`，
 同指纹行消失、`created_at` 差 1ms 的对照行保留，清理后库行数与测试前一致。
-删前必定先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
+`verify_side_tables.py` 成功的标志是 9 项断言全过（会话级联、`session_usage` 只剩未请求的那条、
+`workspaces` 四个判据分支各自符合预期）。
+两个脚本删前都先做全库一致性备份，备份留在 `%APPDATA%\WorkDaddy\backups\`。
 
 回滚：
 
@@ -139,12 +155,14 @@ python apply.py --dry-run && python apply.py
   需要按实测新增过滤规则。
 - 已经打开的页面里，旧版匿名监听器无法从代码侧解绑。补丁生效前若页面已注入过旧钩子，
   第一次需要重启客户端（或重载页面）让 `window` 重建；此后每次重注入都能正常换新。
-
+- `workspaces` 只回收「因这条会话才存在的一次性时间戳目录」。库里那些早就没有会话引用的
+  历史残留不会因为删会话被清掉——那是 `session-sync/wd_workspaces.py` 的职责（它按批记
+  registry、可整批还原）。两处判据一致，但作用域不同，不要混着理解。
 - 作用域只在面板「删除」（硬删路径）。本补丁改的是 `POST /api/sessions/delete`，该接口执行
   `DELETE FROM sessions` 并清理文件；WorkBuddy 官方界面里的删除走的是软删（只写 `deleted_at`），
-  不经过本补丁，因此从官方界面删掉的会话仍会在其他账号留下兄弟行。两条删除路径的差异是
-  实测结论（`daemon.js:12220` 为 `DELETE FROM sessions`，`daemon.js:12245` 的
-  `SET deleted_at = NULL` 是「恢复」而非删除）。
+  不经过本补丁，因此从官方界面删掉的会话仍会在其他账号留下兄弟行、也不会回收附属表。
+  两条删除路径的差异是实测结论（`daemon.js:12220` 为 `DELETE FROM sessions`，
+  `daemon.js:12245` 的 `SET deleted_at = NULL` 是「恢复」而非删除）。
 - WorkDaddy 自动更新会覆盖 `scripts/` 下的文件，更新后需重打补丁（本补丁针对 1.2.18）。
 - `is_background_automation=1` 的会话被删除接口显式排除，本补丁不改变该行为。
 - 指纹以 `created_at` 精确到毫秒为准；若上游改写 `created_at` 语义，需重核级联范围。

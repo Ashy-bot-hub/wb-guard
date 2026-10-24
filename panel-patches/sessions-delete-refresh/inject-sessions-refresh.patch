@@ -1,5 +1,5 @@
 diff --git a/scripts/inject.js b/scripts/inject.js
-index 7387910..6d26ccf 100644
+index 7387910..b567bfc 100644
 --- a/scripts/inject.js
 +++ b/scripts/inject.js
 @@ -1188,6 +1188,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
@@ -27,7 +27,15 @@ index 7387910..6d26ccf 100644
      '继续确认': 'Continue to confirmation', '永久删除': 'Delete permanently',
      '将永久删除所选会话，以及已关联到其他账号的所有同步副本、消息文件和本地缓存。此操作不可恢复。': 'Permanently deletes the selected sessions and all synced copies, message files and local cache across accounts. This cannot be undone.',
      '消息文字阴影': 'Message text shadow', '增强壁纸上的消息文字辨识度': 'Improve message readability over wallpaper',
-@@ -2257,7 +2268,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -2002,7 +2013,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+     '无可同步的目标账号（已排除会话所属账号）': 'No target accounts to sync to (the session owner account is excluded)',
+     '删除后会话将从列表中移除，该账号下的本地消息文件将被永久删除，此操作不可恢复。': 'The sessions are removed from the list and their local message files are permanently deleted; this cannot be undone.',
+     '删除后会话将从列表中移除，本账号的会话及同步到其他账号的同源会话（本地消息文件）都将被永久删除，此操作不可恢复。': 'The sessions are removed from the list. These sessions and their synced counterparts in other accounts (local message files) are permanently deleted; this cannot be undone.',
+-    '含其他账号副本 {n} 个': ' including {n} other-account copies',
+     '以「不让当前账号登录身份过期」的方式切到登录页，可以登录新账号，也可以切回已登录账号': 'Goes to the login page without letting the current account expire; log in a new account or switch back to an existing one.',
+     '不退出 WorkBuddy，在浏览器完成授权后新账号自动加入列表': 'Keeps WorkBuddy running; after authorizing in the browser, the new account is added to the list automatically.',
+     '正在发起授权…': 'Starting authorization…', '再想想': 'Not now',
+@@ -2257,7 +2267,20 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
          if (e instanceof Error) { msg = e && e.message; stack = e && e.stack; }
          else if (e && e.message) { msg = e.message; stack = e.stack; }
          else { msg = String(e); }
@@ -48,7 +56,7 @@ index 7387910..6d26ccf 100644
        var line = '[wbscrash] ' + kind + ': ' + msg + (stack ? '\n' + stack : '');
        try { console.error(line); } catch (_) {}
        if (WBS_DIAGNOSTICS_ENABLED) {
-@@ -2266,8 +2290,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -2266,8 +2289,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
          } catch (_) {}
        }
      }
@@ -63,7 +71,7 @@ index 7387910..6d26ccf 100644
    }
  
    var accountMaskEnabled = false;
-@@ -10286,6 +10314,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -10286,6 +10313,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
            titleEl.textContent = '再次确认永久删除';
            okBtn.textContent = '永久删除';
            cancelBtn.focus();
@@ -72,15 +80,14 @@ index 7387910..6d26ccf 100644
            return;
          }
          pending = true;
-@@ -10299,7 +10329,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+@@ -10299,7 +10328,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
            headers: { 'content-type': 'application/json' },
            body: JSON.stringify({ ids: ids }),
          }).then(function (d) {
 -          var extra = (d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '';
-+          // 删除总数减去勾选数即为「顺带清掉的同源副本」，比单独回报的 cascaded 更直观。
-+          var swept = (d && typeof d.deleted === 'number' && d.deleted > ids.length) ? d.deleted - ids.length : 0;
-+          var extra = swept ? '，含同源副本 ' + swept + ' 个'
-+            : ((d && d.cascaded) ? '，含其他账号副本 ' + d.cascaded + ' 个' : '');
++          // daemon 回报的 cascaded 就是「请求之外顺带清掉的同源副本数」，与
++          // deleted - 勾选数 数学恒等。原先两套算法并存，这里统一用 daemon 的。
++          var extra = (d && d.cascaded) ? '，含同源副本 ' + d.cascaded + ' 个' : '';
            toast('已删除 ' + ((d && typeof d.deleted === 'number') ? d.deleted : ids.length) + ' 个会话' + extra, false, root);
            if (okBtn.onclick === submit) showSessModal(false);
            loadSessions();

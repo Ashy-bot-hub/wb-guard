@@ -37,7 +37,8 @@ MARKERS = {
 REQUIRED_MARKERS = {
     # 两处都要有：只有 [wbscrash 降噪] 说明是「只过滤、没解绑监听器」的中间版本。
     "inject.js": ("[wbscrash 降噪]", "window.__wbsErrListener"),
-    "daemon.js": (),
+    # 只有 [同源副本级联] 说明是「级联但没回收附属登记」的中间版本。
+    "daemon.js": ("[同源副本级联]", "[附属登记回收]"),
 }
 
 

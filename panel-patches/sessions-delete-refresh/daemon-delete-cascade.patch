@@ -1,8 +1,8 @@
 diff --git a/scripts/daemon.js b/scripts/daemon.js
-index 8b64bcd..51b3c0f 100644
+index 8b64bcd..b61951f 100644
 --- a/scripts/daemon.js
 +++ b/scripts/daemon.js
-@@ -12163,6 +12163,42 @@ function handleApi(req, res) {
+@@ -12163,7 +12163,57 @@ function handleApi(req, res) {
          const before = await sqliteQuery('SELECT id, user_id FROM sessions WHERE id IN (' + placeholders + ') AND COALESCE(is_background_automation, 0) = 0;', memberIds);
          const matchedSet = new Set(before.map((row) => String(row.id || '')));
          const matchedIds = memberIds.filter((id) => matchedSet.has(String(id)));
@@ -43,5 +43,74 @@ index 8b64bcd..51b3c0f 100644
 +          log(`[sessions-delete] 展开同源副本失败，仅删除原定集合: ${e.message}`);
 +        }
          const matchedRows = before.filter((row) => matchedSet.has(String(row.id || '')));
++        // [附属登记回收] 先把待删会话的 cwd 取出来：sessions 行删掉之后就查不到了。
++        // 只用于判断这些一次性时间戳目录还有没有别的活跃会话在用。
++        let removedCwds = [];
++        if (matchedIds.length) {
++          try {
++            const cwdRows = await sqliteQuery(
++              'SELECT DISTINCT cwd FROM sessions WHERE id IN (' + sqlPlaceholders(matchedIds) + ") AND cwd IS NOT NULL AND cwd <> '';",
++              matchedIds
++            );
++            removedCwds = cwdRows.map((row) => String(row.cwd || '').trim()).filter(Boolean);
++          } catch (e) {
++            log(`[sessions-delete] 读取待删会话 cwd 失败，跳过工作空间回收: ${e.message}`);
++          }
++        }
          // 1) 先完成可重试的文件与规则清理；失败时保留 DB 记录作为重试锚点。
          const wbHome = PROFILE.dataRoot;
+         let filesRemoved = 0;
+@@ -12187,6 +12237,53 @@ function handleApi(req, res) {
+           if (codeBuddyFiles) filesRemoved = await codeBuddyFiles.deleteSessions(matchedIds, removeRecords);
+           else await removeRecords();
+         }
++        // 3) [附属登记回收] 会话行已经真实删除，它留下的两张附属表记录一并回收。
++        //    a) session_usage 按 session_id 单行存「上下文用量环」。daemon 与客户端读它
++        //       都是 WHERE session_id = ?，会话不存在后没有任何读取路径会再命中，
++        //       留着只是只增不减的死行。
++        //    b) workspaces 是客户端「最近打开」列表（没有 user_id，三账号共用）。这里
++        //       只回收「本次删掉的一次性时间戳目录」，并且要求它已无活跃会话引用、
++        //       超过 24 小时没被打开——与 session-sync/wd_workspaces.py 的三条判据一致，
++        //       避免动到财务分析、日利润表这类手工目录。
++        //    两张表在老库上可能不存在；任一失败只记日志，不影响删除结果。
++        if (matchedIds.length) {
++          try {
++            await sqliteRun(
++              "DELETE FROM session_usage WHERE session_id IN (" + sqlPlaceholders(matchedIds) + ");",
++              matchedIds
++            );
++          } catch (e) {
++            log(`[sessions-delete] 清理 session_usage 失败: ${e.message}`);
++          }
++        }
++        if (removedCwds.length) {
++          try {
++            const stampRe = /(^|[\\/])\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/;
++            const norm = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
++            const liveRows = await sqliteQuery(
++              "SELECT DISTINCT cwd FROM sessions WHERE deleted_at IS NULL AND cwd IS NOT NULL AND cwd <> '';"
++            );
++            const liveCwds = new Set(liveRows.map((row) => norm(row.cwd)));
++            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
++            let wsRemoved = 0;
++            for (const cwd of removedCwds) {
++              if (!stampRe.test(cwd)) continue;
++              if (liveCwds.has(norm(cwd))) continue;
++              try {
++                const r = await sqliteRun(
++                  'DELETE FROM workspaces WHERE path = ? AND last_opened_at < ?;',
++                  [cwd, cutoff]
++                );
++                wsRemoved += Number(r && r.changes) || 0;
++              } catch (e) {
++                log(`[sessions-delete] 清理 workspaces（${cwd}）失败: ${e.message}`);
++              }
++            }
++            if (wsRemoved) log(`[sessions-delete] 顺带清理工作空间登记 ${wsRemoved} 条`);
++          } catch (e) {
++            log(`[sessions-delete] 清理 workspaces 失败: ${e.message}`);
++          }
++        }
+         const cascaded = matchedIds.filter((id) => !requestedSet.has(String(id))).length;
+         log(`[sessions-delete] 已真实删除 ${matchedIds.length} 个会话（DB + ${filesRemoved} 项文件，级联副本 ${cascaded}）`);
+         return json(res, 200, { ok: true, deleted: matchedIds.length, requested: ids.length, cascaded, filesRemoved, rulesRemoved });
