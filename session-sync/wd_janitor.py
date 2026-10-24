@@ -269,44 +269,63 @@ def rotate_own_logs(limit_mb=ROTATE_MB):
     return moved
 
 
-def _sweep_dir(path):
-    """整目录删不掉时的降级：逐个删子项，能删多少算多少。
+def _remove_tree(path, failed=None):
+    """自底向上逐项删除：撞到占用的那一项跳过，兄弟项照删。
 
-    触发场景很实在：目录里混着一个删不掉的文件（被安全规则保护、或仍被进程
-    占用），整个 rmtree / 回收站操作会整批回滚 —— 190 MB 的目录因为一个 0.9 MB
-    的文件而一个字节都收不回来。逐个删就把「全有或全无」变成尽力而为。
-    子项删完后再试一次 rmdir：空了就顺手收掉，没空也不报错。
+    与 `shutil.rmtree` 的差别只有一处，但这处很关键：rmtree 遇到第一个删不掉
+    的文件就整体抛出，同目录里其余本来能删的文件一个都不会动。2026-10-24 实测
+    到差距 —— 10-21、10-23 两个日期目录合计 342 MB，`--apply` 报「占用中跳过」
+    且一个字节都没回收，一分钟后用逐文件 `os.remove` 删，176 个文件 0 失败。
+    差别不在占用，在「遇错即放弃」这个语义上。
+
+    子目录递归用同一个函数，不再对子目录调 rmtree：那样只是一个 190 MB 的
+    目录里套了另一个「全有或全无」，问题被推迟而非解决。
+
+    `failed` 收集没删掉的路径，供调用方延迟重试；不传就只统计不返回。
     """
+    failed = [] if failed is None else failed
     freed = 0
-    try:
-        names = os.listdir(path)
-    except OSError:
-        return 0
-    for name in names:
-        p = os.path.join(path, name)
-        try:
-            if os.path.isdir(p) and not os.path.islink(p):
-                before = dir_size(p)
-                shutil.rmtree(p)
-                freed += before - (dir_size(p) if os.path.isdir(p) else 0)
-            else:
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            p = os.path.join(root, name)
+            try:
                 size = os.path.getsize(p)
                 os.remove(p)
                 freed += size
-        except OSError:
-            pass
+            except OSError:
+                failed.append(p)
+        for name in dirs:
+            p = os.path.join(root, name)
+            try:
+                os.rmdir(p)
+            except OSError:
+                if os.path.exists(p):      # 子项没删净，目录自然留着，不是新问题
+                    failed.append(p)
     try:
         os.rmdir(path)
     except OSError:
-        pass
+        if os.path.exists(path):
+            failed.append(path)
     return freed
+
+
+def _sweep_dir(path, failed=None):
+    """整目录删不掉时的降级：逐个删子项，能删多少算多少。
+
+    触发场景很实在：目录里混着一个删不掉的文件（被安全规则保护、或仍被进程
+    占用），整个 rmtree 操作整批回滚 —— 190 MB 的目录因为一个 0.9 MB 的文件
+    而一个字节都收不回来。逐个删就把「全有或全无」变成尽力而为。
+    """
+    return _remove_tree(path, failed)
 
 
 def _delete_target(path):
     """真正执行删除（在 --delete-one 子进程里跑），返回是否删干净。
 
-    先试整目录/整文件一次到位；失败则退回逐子项，把能删的删掉。
-    这条路径不能放在主循环里 —— 见 _delete_one 的说明。
+    先试整目录/整文件一次到位；失败则退回逐项删除（见 `_remove_tree`），
+    剩下的失败项再等 1.5 秒重试一轮 —— 客户端对会话日志是「写时开、写完关」，
+    占用是间歇的，实测同一文件隔一分钟再删就成功。重试只针对失败项，不重扫
+    已删掉的部分。
     """
     if not os.path.exists(path):
         return True
@@ -316,7 +335,18 @@ def _delete_target(path):
         except OSError:
             pass
         if os.path.isdir(path):
-            _sweep_dir(path)
+            failed = []
+            _sweep_dir(path, failed)
+            if failed:
+                time.sleep(1.5)
+                for p in failed:
+                    try:
+                        if os.path.isdir(p) and not os.path.islink(p):
+                            os.rmdir(p)
+                        elif os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
         return not os.path.exists(path)
     try:
         os.remove(path)

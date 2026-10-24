@@ -133,6 +133,92 @@ class TestDirFallback(unittest.TestCase):
             os.rmdir(d)
 
 
+class TestPartialRetry(unittest.TestCase):
+    """降级删除的两条硬要求：子目录要递归、失败项要重试。
+
+    2026-10-24 实测的差距就在这里：10-21、10-23 两个日期目录合计 342 MB，
+    `--apply` 报「占用中跳过」、一个字节没回收；一分钟后逐文件删，176 个
+    文件 0 失败。旧实现对子目录直接调 `shutil.rmtree`，一次抛出就整块放弃，
+    顶层删了、子目录里本来能删的全留着。
+    """
+
+    def test_subdir_lock_does_not_discard_siblings(self):
+        d = tempfile.mkdtemp(prefix="wd-test-")
+        sub = os.path.join(d, "sdk")
+        os.makedirs(sub)
+        paths = [os.path.join(d, "top.log"),
+                 os.path.join(sub, "ok1.log"),
+                 os.path.join(sub, "keep.log"),
+                 os.path.join(sub, "ok2.log")]
+        for p in paths:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("x" * 100)
+        keeper = os.path.join(sub, "keep.log")
+        real_remove = os.remove
+
+        def fake_remove(p, *a, **k):
+            if os.path.normcase(p) == os.path.normcase(keeper):
+                raise OSError("locked")
+            return real_remove(p, *a, **k)
+
+        try:
+            with mock.patch.object(J.shutil, "rmtree", side_effect=OSError("整批回滚")), \
+                 mock.patch.object(J.os, "remove", side_effect=fake_remove), \
+                 mock.patch.object(J.time, "sleep", return_value=None):
+                ok = J._delete_target(d)
+            self.assertFalse(ok, "还有删不掉的子项 → 不算删干净")
+            self.assertTrue(os.path.exists(keeper), "被占用的文件必须留下")
+            for gone in (paths[0], paths[1], paths[3]):
+                self.assertFalse(os.path.exists(gone), "同目录兄弟项必须删掉: %s" % gone)
+        finally:
+            for root, _dirs, files in os.walk(d, topdown=False):
+                for n in files:
+                    try:
+                        real_remove(os.path.join(root, n))
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    pass
+
+    def test_transient_lock_is_retried_and_dir_removed(self):
+        """第一次抛占用、重试成功的目录，最终要删净并收掉空目录。"""
+        d = tempfile.mkdtemp(prefix="wd-test-")
+        files = [os.path.join(d, "a%d.log" % i) for i in range(3)]
+        for p in files:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("x" * 100)
+        real_remove = os.remove
+        state = {"n": 0}
+
+        def flaky(p, *a, **k):
+            if p in files and state["n"] == 0:
+                state["n"] += 1            # 只在第一次删时占用
+                raise OSError("busy")
+            return real_remove(p, *a, **k)
+
+        try:
+            with mock.patch.object(J.shutil, "rmtree", side_effect=OSError("整批回滚")), \
+                 mock.patch.object(J.os, "remove", side_effect=flaky), \
+                 mock.patch.object(J.time, "sleep", return_value=None):
+                ok = J._delete_target(d)
+            self.assertTrue(ok, "重试后应删净")
+            self.assertFalse(os.path.exists(d), "空目录也要收掉")
+        finally:
+            if os.path.isdir(d):
+                for root, _dirs, fs in os.walk(d, topdown=False):
+                    for n in fs:
+                        try:
+                            real_remove(os.path.join(root, n))
+                        except OSError:
+                            pass
+                    try:
+                        os.rmdir(root)
+                    except OSError:
+                        pass
+
+
 class TestApplyIsolation(unittest.TestCase):
     """一项失败不能让整轮停摆。
 
