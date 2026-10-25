@@ -40,7 +40,7 @@
 
 | 来源 | 位置 | 内容 |
 | --- | --- | --- |
-| WB-GUARD `panel-patches/sessions-delete-refresh/apply.py`（r6） | hunk 在 1188、1856、2257、2266、10286 行附近 | 会话删除级联与刷新 |
+| WB-GUARD `panel-patches/sessions-delete-refresh/apply.py`（r6） | hunk 在 1188、1856、2257、2266、10286 行附近 | daemon 侧删除级联（同指纹兄弟行 + 伴生/派生文件）；inject 侧 error 钩子重建与崩溃降噪 |
 | 本次 A1 | 5188 行附近 `onWindowChange` | resize 崩溃修复 |
 
 两者不重叠，`apply.py` 也不做哈希校验、靠标记幂等，所以它正常运行时不会覆盖 A1。真正的风险是 **WorkDaddy 升级会整体覆盖 `scripts/`，r6 与 A1 会一起丢失**；恢复顺序必须是先 `apply.py` 打 r6、再打 A1/B1，否则 `apply.py` 可能因上下文变化要求先 `--restore-backup`。
