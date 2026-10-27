@@ -151,6 +151,21 @@ python apply.py
 # 4) daemon.js 的改动需重启 WorkDaddy 守护进程后才生效
 ```
 
+### 装 1.2.18 与重打补丁
+
+安装包不在本机留存，需要时从上游取：
+
+- 下载：`https://github.com/babygoton/WorkDaddy/releases/download/1.2.18/WorkDaddy-Setup-1.2.18.exe`
+- 校验：28954985 字节，SHA256 `0bb2b47425c831d7c602ce9c65e4bebcd6d57f532fe561934477d6974b4a8df4`（与发布页 digest 一致）
+
+三步：
+
+1. 静默安装：`WorkDaddy-Setup-1.2.18.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="%LOCALAPPDATA%\Programs\WorkDaddy"`
+2. 核对版本：`scripts\daemon.js` 的 `DAEMON_VERSION` 应为 `1.2.18`（GitHub tag 原文写作 `1.2.68`，安装包把它归一成 tag 号，两个值 `apply.py` 都接受）
+3. 重打补丁：`python apply.py`，再重新注入并重启守护
+
+自动更新会覆盖 `inject.js` 与 `daemon.js`，每次更新后重复第 3 步即可。
+
 装好之后可以端到端复验是否真的生效（会写库，默认只做只读预检）：
 
 ```powershell
