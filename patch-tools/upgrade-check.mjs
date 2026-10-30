@@ -14,6 +14,7 @@ const DAEMON_LOG = path.join(WD_DATA, 'daemon.log');
 const TARGET_JSON = path.join(WD_DATA, 'workbuddy-target.json');
 const INJECT_JS = path.join(WD_SCRIPTS, 'inject.js');
 const COMPAT_JS = path.join(WD_SCRIPTS, 'workbuddy-compat.js');
+const DAEMON_JS = path.join(WD_SCRIPTS, 'daemon.js');
 
 const rows = [];
 const add = (name, ok, detail) => rows.push({ name, ok, detail });
@@ -42,6 +43,9 @@ try {
   add('补丁 A1 onWindowChange 守卫', inject.includes('target && target.nodeType && root && root.contains(target)'), 'inject.js');
   const compat = fs.readFileSync(COMPAT_JS, 'utf8');
   add('补丁 B1 输入框选择器兼容', compat.includes('div.cr-input-box'), 'workbuddy-compat.js');
+  const daemonSrc = fs.readFileSync(DAEMON_JS, 'utf8');
+  const c1Applied = daemonSrc.includes('[wbg-patch C1]') && daemonSrc.includes('SESSION_SYNC_IDLE_WAIT_MS');
+  add('补丁 C1 切号同步等待', c1Applied, c1Applied ? 'daemon.js 等待阈值 ' + (daemonSrc.match(/SESSION_SYNC_IDLE_WAIT_MS = (\d+)/) || [])[1] + ' 毫秒' : 'daemon.js 未见 C1 标记');
 } catch (e) {
   add('补丁文件可读', false, e.message);
 }

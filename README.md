@@ -6,6 +6,7 @@ WorkBuddy / WorkDaddy 桌面端的多账号会话治理工具集。
 |---|---|
 | `session-sync/` | 一个 Windows 计划任务驱动的治理链：转录血缘统一、日志与影子副本回收、体检、库维护、备份保留策略。说明见 `session-sync/README.md` |
 | `panel-patches/` | 针对上游安装文件的一次性补丁（目前 1 项：同源副本级联删除 + 两步确认提示，已适配 `1.2.18`），带校验、备份与回滚脚本。说明见各子目录 README |
+| `patch-tools/` | 上游升级后的一键重打与体检：`apply-patches.mjs` 幂等重打 A1（resize 崩溃）、B1（输入框选择器）、C1（切号同步等待）三处补丁并同步 `workbuddy-target.json`，`upgrade-check.mjs` 做 14 项只读体检。说明见 `patch-tools/README.md` |
 
 ## 与上游 WorkDaddy 的职责边界
 

@@ -2,8 +2,8 @@
 
 本文件记录本机在 WorkDaddy 1.2.18 上打的自有补丁。WorkDaddy 升级会整体覆盖 `scripts/`，补丁随之丢失，届时按本文件重打一遍即可。
 
-- 适配客户端：WorkBuddy 5.9.2（`C:\Program Files\WorkBuddy`，appVersion 5.9.2）
-- 补丁日期：2026-10-25
+- 适配客户端：WorkBuddy 5.9.3（`C:\Program Files\WorkBuddy`，appVersion 5.9.3）；WorkDaddy 1.2.18
+- 补丁日期：2026-10-25 首版，2026-10-30 增补 C1 并同步 5.9.3
 - 备份目录：`%APPDATA%\WorkDaddy\backups\patches\`
 - 验证入口：`%USERPROFILE%\WorkBuddy\2026-10-25-13-37-11\patch-tools\check.cmd`
 
@@ -45,11 +45,12 @@
 ### B2 目标档案版本同步（workbuddy-target.json）
 
 - 位置：`%APPDATA%\WorkDaddy\workbuddy-target.json`
-- 原因：升级后该文件仍写 `version: 5.8.3.0`，与实际 5.9.2 不符。
+- 原因：升级后该文件仍写旧版本号，与实际安装版本不符。
 - 改法：调用 WorkDaddy 自带的 `workbuddy-target.js` 重新构建并写盘，未手改字段。
-- 结果：`version: 5.9.2`，`binary` 保持反斜杠原格式，`cdp.port` 仍为 9222，`lockVersion` 仍为 false。
-- 修改前 sha256：`74607079b6908a52269f3e23fc3277552b8b98201feab365112877d49b39f5a2`
-- 修改后 sha256：`031f08a701c37db65c912fe744604cbe59515e448245d58acd41d56be65da550`
+- 结果：`version: 5.9.3`（2026-10-30 自 5.9.2 同步），`binary` 保持反斜杠原格式，`cdp.port` 仍为 9222，`lockVersion` 仍为 false。
+- 修改前 sha256：`031f08a701c37db65c912fe744604cbe59515e448245d58acd41d56be65da550`（5.9.2）
+- 修改后 sha256：`ab06f943e6ad9ef06ec6124f9ab98af7848fd28c74ea3e71b1aa38e6cc0ea5f3`（5.9.3）
+- 历史值：2026-10-25 首次同步时 5.8.3 → 5.9.2，当次前后哈希见仓库历史版本。
 
 ## 明确未做
 

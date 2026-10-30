@@ -8,7 +8,7 @@ WorkDaddy 每次升级会整体覆盖 `scripts/`，本目录里的补丁随之�
 
 | 文件 | 作用 |
 | --- | --- |
-| `check.cmd` / `upgrade-check.mjs` | 13 项只读体检，退出码 0/1；结果自动追加到 `%APPDATA%\WorkDaddy\backups\patches\checks\<日期>.json` |
+| `check.cmd` / `upgrade-check.mjs` | 14 项只读体检，退出码 0/1；结果自动追加到 `%APPDATA%\WorkDaddy\backups\patches\checks\<日期>.json` |
 | `repatch.cmd` / `apply-patches.mjs` | 幂等重打 A1、B1、C1 三处补丁并重建 `workbuddy-target.json`；默认预览，`--apply` 才落盘，`--only=c1` 只打指定项；改前备份、改后 `node --check`，失败自动回滚 |
 | `test-c1-idle-wait.mjs` | C1 补丁行为测试，只读 `daemon.js`、抽补丁段跑桩件，八项断言，退出码 0/1 |
 | `regen-target.cjs` | 单独重建 `workbuddy-target.json`（调用 WorkDaddy 自带的 `workbuddy-target.js`，不手改字段） |
@@ -16,9 +16,9 @@ WorkDaddy 每次升级会整体覆盖 `scripts/`，本目录里的补丁随之�
 
 `.mjs` 用 WorkDaddy 自带的 Node 跑：`%LOCALAPPDATA%\Programs\WorkDaddy\scripts\runtime\node\node.exe`。两个 `.cmd` 已是 GBK + CRLF，双击即用，正常结束不 `pause`。
 
-## 体检覆盖的 13 项
+## 体检覆盖的 14 项
 
-WorkBuddy 版本可读 / `workbuddy-target.json` 版本同步 / 补丁 A1 / 补丁 B1 / 脚本语法 / 渲染进程注入 / 输入框与工具条识别 / 队列适配器 / 会话与控制器 / 运行版本 / `resize` 崩溃回归 / 近 24h 有效崩溃 / WB-GUARD r6 标记。
+WorkBuddy 版本可读 / `workbuddy-target.json` 版本同步 / 补丁 A1 / 补丁 B1 / 补丁 C1 / 脚本语法 / 渲染进程注入 / 输入框与工具条识别 / 队列适配器 / 会话与控制器 / 运行版本 / `resize` 崩溃回归 / 近 24h 有效崩溃 / WB-GUARD r6 标记。
 
 两个设计取舍：
 
