@@ -9,6 +9,19 @@
 
 ## 已打补丁
 
+### C1 会话忙碌时等待而非立刻报错（daemon.js）
+
+- 位置：`scripts\daemon.js`，函数 `assertSessionSyncIdle`
+- 日期：2026-10-30，目标为 WorkDaddy 1.2.18 的 `daemon.js`（与 WorkBuddy 5.9.3 同机运行）
+- 原因：原实现一见有会话处于 `Working` / `Planning` 立即抛「当前账号有会话仍在运行」，一次失败就让整轮账号切换中止，并把失败记录挂到账号名下形成屏障，后续切号全被拦。本机 10 月 25 日至 30 日累计 16 次同因失败。
+- 改法：把探测与判定拆开——`sessionSyncBusy` 只返回布尔值，`assertSessionSyncIdle` 改成轮询等待，最长 60 秒、每 2 秒复查一次，只有超时才抛原错误文案。等待与放行各记一条 `[wbg-patch C1]` 日志，便于在 `daemon.log` 里核对。
+- 判据行：`// [wbg-patch C1] 会话忙碌时先轮询等待空闲，超时才报错`
+- 修改前 sha256：`ed5ec5da848d5c0919a8dfc2d377da90512af352147d895b9b57cdcc6223a166`
+- 修改后 sha256：`028126c576dde160ae2266e1cfe98be90e265ff8e4f04b90e8e954942ba045fe`
+- 备份：`%APPDATA%\WorkDaddy\backups\patches\daemon_修改前_20261030-135947.js`
+- 行为测试：`node patch-tools\test-c1-idle-wait.mjs`，八项断言覆盖空闲直通、短时忙碌放行、持续忙碌超时、codebuddy 档案、CDP 未连接
+- 生效条件：结束守护进程后由看门狗重拉，或直接重启 WorkDaddy；本次实测看门狗未自动拉起，改为手工启动 `runtime\node\node.exe --experimental-sqlite daemon.js`
+
 ### A1 修复 resize 崩溃（inject.js）
 
 - 位置：`scripts\inject.js`，函数 `onWindowChange`
@@ -50,7 +63,7 @@
 
 1. 双击 `patch-tools\check.cmd`，看哪几项标 `[失败]`。
 2. 若「渲染进程注入」失败且提示「没有调试端口」，先确认启动方式：从桌面图标直启的 `WorkBuddy.exe` 命令行里没有 `--remote-debugging-port`，注入必然整体不加载。此时完全退出客户端，用桌面 `WorkDaddy.lnk` 重开，再体检一次。
-3. 若「补丁 A1 / B1」或「workbuddy-target.json 版本同步」失败，优先用一条命令重打：`node patch-tools\apply-patches.mjs`（先预览）→ `node patch-tools\apply-patches.mjs --apply`（落盘）。该脚本幂等，已有标记就跳过，改前自动备份并做语法校验，失败会自动回滚；也可双击 `patch-tools\repatch.cmd`。
+3. 若「补丁 A1 / B1」或「workbuddy-target.json 版本同步」失败，优先用一条命令重打：`node patch-tools\apply-patches.mjs`（先预览）→ `node patch-tools\apply-patches.mjs --apply`（落盘）。该脚本幂等，已有标记就跳过，改前自动备份并做语法校验，失败会自动回滚；也可双击 `patch-tools\repatch.cmd`。只补其中一项时加 `--only=c1`（可写 `a1,b1,c1,b2` 组合）。
 4. 只有 `apply-patches.mjs` 报「需手工」时，才按本文 A1、B1 的原文手改。
 5. 若 WB-GUARD 的 r6 标记也丢了，**先**跑 `%USERPROFILE%\WorkBuddy\wb-guard\panel-patches\sessions-delete-refresh\apply.py` 打 r6，**再**跑 `apply-patches.mjs` 打 A1/B1。
 6. 改完退出并重新打开 WorkDaddy，让渲染进程重新加载 `inject.js`。体检结果会自动留档在 `backups\patches\checks\<日期>.json`。

@@ -9,7 +9,8 @@ WorkDaddy 每次升级会整体覆盖 `scripts/`，本目录里的补丁随之�
 | 文件 | 作用 |
 | --- | --- |
 | `check.cmd` / `upgrade-check.mjs` | 13 项只读体检，退出码 0/1；结果自动追加到 `%APPDATA%\WorkDaddy\backups\patches\checks\<日期>.json` |
-| `repatch.cmd` / `apply-patches.mjs` | 幂等重打 A1、B1 两处补丁并重建 `workbuddy-target.json`；默认预览，`--apply` 才落盘；改前备份、改后 `node --check`，失败自动回滚 |
+| `repatch.cmd` / `apply-patches.mjs` | 幂等重打 A1、B1、C1 三处补丁并重建 `workbuddy-target.json`；默认预览，`--apply` 才落盘，`--only=c1` 只打指定项；改前备份、改后 `node --check`，失败自动回滚 |
+| `test-c1-idle-wait.mjs` | C1 补丁行为测试，只读 `daemon.js`、抽补丁段跑桩件，八项断言，退出码 0/1 |
 | `regen-target.cjs` | 单独重建 `workbuddy-target.json`（调用 WorkDaddy 自带的 `workbuddy-target.js`，不手改字段） |
 | `cdp-probe.mjs` | 一次性 CDP 求值器，配合任意表达式文件排查渲染进程 |
 

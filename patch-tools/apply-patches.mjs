@@ -1,5 +1,5 @@
 'use strict';
-// 升级后一键重打本机 WorkDaddy 补丁（A1/B1 + B2）。
+// 升级后一键重打本机 WorkDaddy 补丁（A1/B1/C1 + B2）。
 // 默认只预览；确认无误后加 --apply 落盘。幂等：已有补丁标记就跳过。
 // 用法：
 //   node apply-patches.mjs            # 预览
@@ -24,6 +24,10 @@ const MANIFEST = 'C:/Program Files/WorkBuddy/resources/install-manifest.json';
 const BINARY = ['C:', 'Program Files', 'WorkBuddy', 'WorkBuddy.exe'].join(String.fromCharCode(92));
 
 const APPLY = process.argv.includes('--apply');
+// --only=c1 只打指定项（逗号分隔，可写 a1,b1,c1,b2）；不传则全打
+const ONLY = ((process.argv.find(a => a.startsWith('--only=')) || '').slice('--only='.length))
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const want = tag => !ONLY.length || ONLY.includes(tag);
 const stamp = (() => {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
@@ -55,6 +59,52 @@ const B1_NEW_LINES = [
   '    // WorkBuddy 5.9.2 已移除 _inputBox_ 类，输入框容器改用 div.cr-input-box；',
   '    // 两个都试，避免官方改名后这条路径直接失效。',
   '    var selector = \'[class*="_inputBox_"],div.cr-input-box\';',
+];
+
+// C1：切号同步遇到「会话仍在运行」时先等待，不再立刻抛错。
+// 原实现一见 Working / Planning 就抛，导致整轮账号切换中止，并把失败记录挂到
+// 账号名下形成屏障，后续切号全被拦（本机 10-25 至 10-30 共 16 次）。
+// 这里改成轮询等待：默认最多 60 秒，每 2 秒复查一次，超时才抛原错误。
+const C1_MARK = '[wbg-patch C1]';
+const C1_START_LINE = 'async function assertSessionSyncIdle(sessionIds = []) {';
+const C1_END_LINE = 'async function assertAccountSwitchIdle() {';
+const C1_NEW_LINES = [
+  '// [wbg-patch C1] 会话忙碌时先轮询等待空闲，超时才报错（原逻辑立即抛错，会中止整轮切号）。',
+  'const SESSION_SYNC_IDLE_WAIT_MS = 60000;',
+  'const SESSION_SYNC_IDLE_POLL_MS = 2000;',
+  'async function sessionSyncBusy(sessionIds = []) {',
+  "  if (PROFILE.kind === 'codebuddy') {",
+  '    const sessions = (await codeBuddyNative.sessionItems()).map(item => JSON.parse(item.value));',
+  "    return sessions.some(s => (!sessionIds.length || sessionIds.includes(s.conversationId)) && ['Working', 'Planning'].includes(s.status));",
+  '  }',
+  "  if (PROFILE.kind !== 'workbuddy') return false;",
+  "  if (!cdp.connected) throw new Error('无法确认会话状态，请连接 WorkBuddy 后重试');",
+  "  const ids = Array.isArray(sessionIds) ? sessionIds.map(id => String(id || '').trim()).filter(Boolean) : [];",
+  '  const expression = ids.length',
+  '    ? "typeof window.__wbsSessionsBusy === \'function\' ? window.__wbsSessionsBusy(" + JSON.stringify(ids) + ") : (typeof window.__wbsAnySessionBusy === \'function\' ? window.__wbsAnySessionBusy() : null)"',
+  '    : "typeof window.__wbsAnySessionBusy === \'function\' ? window.__wbsAnySessionBusy() : null";',
+  "  const result = await cdpSend('Runtime.evaluate', { expression, returnByValue: true });",
+  '  const busy = result && result.result && result.result.value;',
+  "  if (result.exceptionDetails || typeof busy !== 'boolean') throw new Error('无法确认会话状态，请等待面板加载后重试');",
+  '  return busy;',
+  '}',
+  'async function assertSessionSyncIdle(sessionIds = []) {',
+  '  const startedAt = Date.now();',
+  '  let announced = false;',
+  '  for (;;) {',
+  '    const busy = await sessionSyncBusy(sessionIds);',
+  '    if (!busy) {',
+  "      if (announced) log('[wbg-patch C1] 会话已空闲，继续同步（等待 ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒）');",
+  '      return;',
+  '    }',
+  "    if (Date.now() - startedAt >= SESSION_SYNC_IDLE_WAIT_MS) throw new Error('当前账号有会话仍在运行，请等待完成或停止后再同步');",
+  '    if (!announced) {',
+  '      announced = true;',
+  "      log('[wbg-patch C1] 会话仍在运行，等待空闲后再同步（最多 ' + Math.round(SESSION_SYNC_IDLE_WAIT_MS / 1000) + ' 秒）');",
+  '    }',
+  '    await sleep(Math.min(SESSION_SYNC_IDLE_POLL_MS, Math.max(200, SESSION_SYNC_IDLE_WAIT_MS - (Date.now() - startedAt))));',
+  '  }',
+  '}',
 ];
 
 const results = [];
@@ -105,11 +155,48 @@ function patchFile(name, oldLines, newLines, marker) {
 }
 
 // A1 / B1
-patchFile('inject.js', A1_OLD_LINES, A1_NEW_LINES, A1_MARK);
-patchFile('workbuddy-compat.js', B1_OLD_LINES, B1_NEW_LINES, B1_MARK);
+if (want('a1')) patchFile('inject.js', A1_OLD_LINES, A1_NEW_LINES, A1_MARK);
+if (want('b1')) patchFile('workbuddy-compat.js', B1_OLD_LINES, B1_NEW_LINES, B1_MARK);
+
+// C1：整段替换 assertSessionSyncIdle（daemon.js 是纯 LF）
+function patchRange(name, startLine, endLine, newLines, marker) {
+  const file = path.join(SCRIPTS, name);
+  if (!fs.existsSync(file)) {
+    results.push({ name, state: '缺失', detail: file });
+    return;
+  }
+  const src = fs.readFileSync(file, 'utf8');
+  if (src.includes(marker)) {
+    results.push({ name, state: '已是最新', detail: '补丁标记存在' });
+    return;
+  }
+  const startAt = src.indexOf(startLine);
+  const endAt = startAt < 0 ? -1 : src.indexOf(endLine, startAt);
+  if (startAt < 0 || endAt < 0) {
+    results.push({ name, state: '需手工', detail: '未找到函数边界，可能上游版本已变' });
+    return;
+  }
+  if (!APPLY) {
+    results.push({ name, state: '待打', detail: '预览模式，加 --apply 执行' });
+    return;
+  }
+  const eol = /\r\n/.test(src) ? '\r\n' : '\n';
+  const next = src.slice(0, startAt) + newLines.join(eol) + eol + src.slice(endAt);
+  const bak = backup(file, '修改');
+  fs.writeFileSync(file, next, 'utf8');
+  try {
+    execFileSync(NODE_EXE, ['--check', file], { stdio: 'pipe' });
+    results.push({ name, state: '已打', detail: `语法通过；备份 ${path.basename(bak)}；sha256 ${sha256(fs.readFileSync(file)).slice(0, 12)}` });
+  } catch (e) {
+    fs.copyFileSync(bak, file);
+    results.push({ name, state: '回滚', detail: '改后语法校验失败，已用备份还原：' + String(e.stderr || e.message).slice(0, 120) });
+  }
+}
+
+if (want('c1')) patchRange('daemon.js', C1_START_LINE, C1_END_LINE, C1_NEW_LINES, C1_MARK);
 
 // B2：目标档案版本跟随安装包
-try {
+if (want('b2')) try {
   const wbVersion = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')).appVersion;
   const targetPath = path.join(DATA_DIR, 'workbuddy-target.json');
   const cur = fs.existsSync(targetPath) ? JSON.parse(fs.readFileSync(targetPath, 'utf8')) : null;
