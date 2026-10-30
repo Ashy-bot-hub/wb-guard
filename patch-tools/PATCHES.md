@@ -20,6 +20,7 @@
 - 修改后 sha256：`028126c576dde160ae2266e1cfe98be90e265ff8e4f04b90e8e954942ba045fe`
 - 备份：`%APPDATA%\WorkDaddy\backups\patches\daemon_修改前_20261030-135947.js`
 - 行为测试：`node patch-tools\test-c1-idle-wait.mjs`，八项断言覆盖空闲直通、短时忙碌放行、持续忙碌超时、codebuddy 档案、CDP 未连接
+- 在线验证：2026-10-30 对一条处于 `working` 的会话发跨账号复制请求，请求耗时 61 秒后返回原文案「当前账号有会话仍在运行，请等待完成或停止后再同步」，`daemon.log` 记下 `[wbg-patch C1] 会话仍在运行，等待空闲后再同步（最多 60 秒）`；补丁前同场景 1 秒内即失败。脚本为 `patch-tools\test-c1-live.sh`（会临时拉起守护进程）
 - 生效条件：结束守护进程后由看门狗重拉，或直接重启 WorkDaddy；本次实测看门狗未自动拉起，改为手工启动 `runtime\node\node.exe --experimental-sqlite daemon.js`
 
 ### A1 修复 resize 崩溃（inject.js）

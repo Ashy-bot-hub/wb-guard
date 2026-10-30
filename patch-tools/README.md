@@ -11,6 +11,7 @@ WorkDaddy 每次升级会整体覆盖 `scripts/`，本目录里的补丁随之�
 | `check.cmd` / `upgrade-check.mjs` | 14 项只读体检，退出码 0/1；结果自动追加到 `%APPDATA%\WorkDaddy\backups\patches\checks\<日期>.json` |
 | `repatch.cmd` / `apply-patches.mjs` | 幂等重打 A1、B1、C1 三处补丁并重建 `workbuddy-target.json`；默认预览，`--apply` 才落盘，`--only=c1` 只打指定项；改前备份、改后 `node --check`，失败自动回滚 |
 | `test-c1-idle-wait.mjs` | C1 补丁行为测试，只读 `daemon.js`、抽补丁段跑桩件，八项断言，退出码 0/1 |
+| `test-c1-live.sh` | C1 在线验证，临时拉起守护进程并对运行中会话发一次跨账号复制，看是否先等 60 秒再报错；跑完会留下一个守护进程，收尾时自行处理 |
 | `regen-target.cjs` | 单独重建 `workbuddy-target.json`（调用 WorkDaddy 自带的 `workbuddy-target.js`，不手改字段） |
 | `cdp-probe.mjs` | 一次性 CDP 求值器，配合任意表达式文件排查渲染进程 |
 
